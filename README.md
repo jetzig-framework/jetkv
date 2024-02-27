@@ -10,16 +10,16 @@ _JetKV_ can be used for:
 * Persistent data storage.
 * Cache.
 
-For production systems, battle-tested tools like _Redis_, _memcache_, _RabbitMQ_, etc. are recommended.
+For production systems, battle-tested tools like _Redis_, _memcache_, _RabbitMQ_, etc. are recommended: _JetKV_ makes very little effort to be particularly performant or memory efficient.
 
 ## Checklist
 
-* :x: In-memory storage.
+* :white_check_mark: In-memory storage.
+* :white_check_mark: String value storage.
+* :white_check_mark: Array value storage.
+* :white_check_mark: Array pop/queue implementation.
 * :x: On-disk storage.
-* :x: String value storage.
-* :x: Array value storage.
 * :x: Key expiry.
-* :x: Array pop/queue implementation.
 * :x: Shared memory.
 
 ## License

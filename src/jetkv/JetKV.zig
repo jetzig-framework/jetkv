@@ -3,6 +3,7 @@ const std = @import("std");
 /// Generic storage, provides an interface for disk and memory storage.
 pub const Storage = @import("Storage.zig");
 pub const String = @import("types.zig").String;
+pub const Array = @import("types.zig").Array;
 
 storage: Storage,
 
@@ -51,4 +52,34 @@ test "put and get a string value" {
     }
 
     try std.testing.expect(jet_kv.get(String, "baz") == null);
+}
+
+test "put and get a string array" {
+    var jet_kv = Self.init(std.testing.allocator, .{});
+    defer jet_kv.deinit();
+
+    const key = "foo";
+    var value = Array.init(std.testing.allocator);
+    defer value.deinit();
+
+    try value.append("bar");
+    try value.append("baz");
+    try value.insert("qux");
+    try value.append("quux");
+
+    const popped = value.pop().?;
+    defer std.testing.allocator.free(popped);
+
+    try std.testing.expectEqualStrings("quux", popped);
+
+    try jet_kv.put(Array, key, value);
+
+    if (jet_kv.get(Array, key)) |*capture| {
+        try std.testing.expectEqual(3, capture.size());
+        try std.testing.expectEqualDeep(value.items(), capture.items());
+    } else {
+        try std.testing.expect(false);
+    }
+
+    try std.testing.expect(jet_kv.get(Array, "qux") == null);
 }
