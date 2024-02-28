@@ -47,14 +47,25 @@ pub fn get(self: *Self, comptime T: type, key: []const u8) ?T {
 /// Add a value to the memory-based backend.
 pub fn put(self: *Self, comptime T: type, key: []const u8, value: T) !void {
     switch (T) {
-        jetkv.types.String => return try self.string_storage.put(
-            try self.allocator.dupe(u8, key),
-            try self.allocator.dupe(u8, value),
-        ),
+        jetkv.types.String => {
+            if (self.string_storage.fetchRemove(key)) |entry| {
+                self.allocator.free(entry.key);
+                self.allocator.free(entry.value);
+            }
+            try self.string_storage.put(
+                try self.allocator.dupe(u8, key),
+                try self.allocator.dupe(u8, value),
+            );
+        },
         jetkv.types.Array => {
             var array = jetkv.types.Array.init(self.allocator);
 
             for (value.items()) |item| try array.append(item);
+
+            if (self.array_storage.fetchRemove(key)) |*entry| {
+                self.allocator.free(entry.key);
+                @constCast(&entry.value).deinit();
+            }
 
             return self.array_storage.put(try self.allocator.dupe(u8, key), array);
         },
