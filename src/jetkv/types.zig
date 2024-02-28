@@ -28,8 +28,8 @@ pub const Array = struct {
     }
 
     /// Pop the last string added to the array and return it.
-    pub fn pop(self: *Array) ?String {
-        return self.backend.popOrNull();
+    pub fn pop(self: *const Array) ?String {
+        return @constCast(self).backend.popOrNull();
     }
 
     /// Append a string to the Array.

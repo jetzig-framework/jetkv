@@ -72,3 +72,15 @@ pub fn put(self: *Self, comptime T: type, key: []const u8, value: T) !void {
         else => unreachable,
     }
 }
+
+/// Pop a String from an Array in the memory-based backend.
+pub fn pop(self: *Self, key: []const u8) ?[]const u8 {
+    if (self.array_storage.get(key)) |*array| {
+        const value = array.pop();
+        // XXX: This is highly inefficient as `put(Array, ...)` is O(n)
+        self.array_storage.put(key, array.*) catch @panic("OOM");
+        return value;
+    } else {
+        return null;
+    }
+}

@@ -2,7 +2,9 @@ const std = @import("std");
 
 /// Generic storage, provides an interface for disk and memory storage.
 pub const Storage = @import("Storage.zig");
+/// A string that can be stored in the key-value store.
 pub const String = @import("types.zig").String;
+/// An array that can be stored in the key-value store.
 pub const Array = @import("types.zig").Array;
 
 storage: Storage,
@@ -34,6 +36,11 @@ pub fn get(self: *Self, comptime T: type, key: []const u8) ?T {
 /// Store a value in the key-value store.
 pub fn put(self: *Self, comptime T: type, key: []const u8, value: T) !void {
     try self.storage.put(T, key, value);
+}
+
+/// Pop a String from an Array the key-value store.
+pub fn pop(self: *Self, key: []const u8) ?String {
+    return self.storage.pop(key);
 }
 
 test "put and get a string value" {
@@ -82,4 +89,29 @@ test "put and get a string array" {
     }
 
     try std.testing.expect(jet_kv.get(Array, "qux") == null);
+}
+
+test "pop a value from an array" {
+    var jet_kv = Self.init(std.testing.allocator, .{});
+    defer jet_kv.deinit();
+
+    var kv_array = Array.init(std.testing.allocator);
+    defer kv_array.deinit();
+
+    try kv_array.append("bar");
+    try kv_array.append("baz");
+    try kv_array.append("qux");
+
+    try jet_kv.put(Array, "foo", kv_array);
+
+    if (jet_kv.pop("foo")) |string| {
+        try std.testing.expectEqualStrings("qux", string);
+        defer std.testing.allocator.free(string);
+    } else {
+        try std.testing.expect(false);
+    }
+
+    if (jet_kv.get(Array, "foo")) |value| {
+        try std.testing.expectEqualDeep(&[_][]const u8{ "bar", "baz" }, value.items());
+    }
 }

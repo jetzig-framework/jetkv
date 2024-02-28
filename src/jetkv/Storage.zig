@@ -46,3 +46,10 @@ pub fn put(self: *Self, comptime T: type, key: []const u8, value: T) !void {
         inline else => |*capture| try capture.put(T, key, value),
     }
 }
+
+/// Pop a String from an Array in the active storage backend.
+pub fn pop(self: *Self, key: []const u8) ?types.String {
+    switch (self.backend) {
+        inline else => |*capture| return capture.pop(key),
+    }
+}
