@@ -47,6 +47,12 @@ pub fn put(self: *Self, comptime T: type, key: []const u8, value: T) !void {
     }
 }
 
+pub fn prepend(self: *Self, key: []const u8, value: []const u8) !void {
+    switch (self.backend) {
+        inline else => |*capture| try capture.prepend(key, value),
+    }
+}
+
 /// Pop a String from an Array in the active storage backend.
 pub fn pop(self: *Self, key: []const u8) ?types.String {
     switch (self.backend) {
