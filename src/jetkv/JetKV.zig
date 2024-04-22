@@ -1,153 +1,269 @@
 const std = @import("std");
 
-/// Generic storage, provides an interface for disk and memory storage.
-pub const Storage = @import("Storage.zig");
 /// A string that can be stored in the key-value store.
-pub const String = @import("types.zig").String;
-/// An array that can be stored in the key-value store.
-pub const Array = @import("types.zig").Array;
-
 /// Supported types, used for comptime type resolution when a member of this enum is passed to a
 /// JetKV function.
-pub const value_types = enum { string, array };
+pub const ValueType = enum { string, array };
 
-storage: Storage,
+/// Memory-based backend.
+pub const MemoryBackend = @import("backend/MemoryBackend.zig");
+
+/// File-based backend.
+pub const FileBackend = @import("backend/FileBackend.zig");
+
+backend: Backend,
 
 const JetKV = @This();
 
 /// Configure backend and options for a key-value store.
 pub const Options = struct {
-    backend: Storage.BackendType = .memory,
+    backend: BackendType = .memory,
+    file_backend_options: FileBackendOptions = .{},
+};
+
+/// Available storage backends.
+pub const BackendType = enum { memory, file };
+
+/// Options specific to the File-based backend.
+pub const FileBackendOptions = struct {
+    path: ?[]const u8 = null,
+    address_space_size: u32 = FileBackend.addressSpace(4096),
+    truncate: bool = false,
+};
+
+/// Generic storage back end, unifies memory and disk-based storage.
+pub const Backend = union(enum) {
+    memory: MemoryBackend,
+    file: FileBackend,
 };
 
 /// Initialize a new key-value store.
-pub fn init(allocator: std.mem.Allocator, options: Options) JetKV {
-    return .{
-        .storage = Storage.init(allocator, options),
+pub fn init(allocator: std.mem.Allocator, options: Options) !JetKV {
+    const backend = switch (options.backend) {
+        .memory => Backend{ .memory = MemoryBackend.init(allocator, options) },
+        .file => Backend{ .file = try FileBackend.init(options.file_backend_options) },
     };
+    return .{ .backend = backend };
 }
 
 /// Free allocated memory and deinitailize the key-value store.
 pub fn deinit(self: *JetKV) void {
-    self.storage.deinit();
+    switch (self.backend) {
+        inline else => |*capture| return capture.deinit(),
+    }
 }
 
-/// Fetch a value from the key-value store.
-pub fn get(self: *JetKV, comptime VT: value_types, key: []const u8) ?ValueType(VT) {
-    return self.storage.get(ValueType(VT), key);
+/// Fetch a String from the key-value store.
+pub fn get(self: *JetKV, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
+    return switch (self.backend) {
+        inline else => |*capture| try capture.get(allocator, key),
+    };
 }
 
-/// Store a value in the key-value store.
-pub fn put(self: *JetKV, comptime VT: value_types, key: []const u8, value: ValueType(VT)) !void {
-    try self.storage.put(ValueType(VT), key, value);
+/// Store a String in the key-value store.
+pub fn put(self: *JetKV, key: []const u8, value: []const u8) !void {
+    switch (self.backend) {
+        inline else => |*capture| try capture.put(key, value),
+    }
 }
 
+/// Remove a String from the key-value store, return it if found.
+pub fn fetchRemove(self: *JetKV, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
+    return switch (self.backend) {
+        inline else => |*capture| try capture.fetchRemove(allocator, key),
+    };
+}
+
+/// Remove a String from the key-value store.
+pub fn remove(self: *JetKV, key: []const u8) !void {
+    switch (self.backend) {
+        inline else => |*capture| try capture.remove(key),
+    }
+}
+
+/// Append a String at the end of an Array.
+pub fn append(self: *JetKV, key: []const u8, value: []const u8) !void {
+    switch (self.backend) {
+        inline else => |*capture| try capture.append(key, value),
+    }
+}
+
+/// Insert a String at the start of an Array.
 pub fn prepend(self: *JetKV, key: []const u8, value: []const u8) !void {
-    try self.storage.prepend(key, value);
+    switch (self.backend) {
+        inline else => |*capture| try capture.prepend(key, value),
+    }
 }
 
 /// Pop a String from an Array the key-value store.
-pub fn pop(self: *JetKV, key: []const u8) ?String {
-    return self.storage.pop(key);
+pub fn pop(self: *JetKV, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
+    return switch (self.backend) {
+        inline else => |*capture| try capture.pop(allocator, key),
+    };
 }
 
-/// Resolve a type from `value_types` enum of `{ string, array }`
-pub inline fn ValueType(VT: value_types) type {
-    return switch (VT) {
-        .string => String,
-        .array => Array,
+/// Left-pop a String from an Array the key-value store.
+pub fn popFirst(self: *JetKV, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
+    return switch (self.backend) {
+        inline else => |*capture| return try capture.popFirst(allocator, key),
     };
 }
 
 test "put and get a string value" {
-    var jet_kv = JetKV.init(std.testing.allocator, .{});
+    var jet_kv = try JetKV.init(std.testing.allocator, .{});
     defer jet_kv.deinit();
 
     const key = "foo";
     const value = "bar";
 
-    try jet_kv.put(.string, key, value);
+    try jet_kv.put(key, value);
 
-    if (jet_kv.get(.string, key)) |capture| {
+    if (try jet_kv.get(std.testing.allocator, key)) |capture| {
+        defer std.testing.allocator.free(capture);
         try std.testing.expectEqualStrings(value, capture);
     } else {
         try std.testing.expect(false);
     }
 
-    try std.testing.expect(jet_kv.get(.string, "baz") == null);
+    try std.testing.expect(try jet_kv.get(std.testing.allocator, "baz") == null);
 }
 
-test "put and get a string array" {
-    var jet_kv = JetKV.init(std.testing.allocator, .{});
+test "fetchRemove" {
+    var jet_kv = try JetKV.init(std.testing.allocator, .{});
     defer jet_kv.deinit();
 
     const key = "foo";
-    var value = Array.init(std.testing.allocator);
-    defer value.deinit();
+    const value = "bar";
 
-    try value.append("bar");
-    try value.append("baz");
-    try value.prepend("qux");
-    try value.append("quux");
+    try jet_kv.put(key, value);
 
-    const popped = value.pop().?;
-    defer std.testing.allocator.free(popped);
-
-    try std.testing.expectEqualStrings("quux", popped);
-
-    try jet_kv.put(.array, key, value);
-
-    if (jet_kv.get(.array, key)) |*capture| {
-        try std.testing.expectEqual(3, capture.size());
-        try std.testing.expectEqualDeep(value.items(), capture.items());
+    if (try jet_kv.fetchRemove(std.testing.allocator, key)) |capture| {
+        defer std.testing.allocator.free(capture);
+        try std.testing.expectEqualStrings(value, capture);
     } else {
         try std.testing.expect(false);
     }
 
-    try std.testing.expect(jet_kv.get(.array, "qux") == null);
+    try std.testing.expect(try jet_kv.get(std.testing.allocator, key) == null);
 }
 
-test "insert a value in an array" {
-    var jet_kv = JetKV.init(std.testing.allocator, .{});
+test "remove" {
+    var jet_kv = try JetKV.init(std.testing.allocator, .{});
     defer jet_kv.deinit();
 
-    var kv_array = Array.init(std.testing.allocator);
-    defer kv_array.deinit();
+    const key = "foo";
+    const value = "bar";
 
-    try kv_array.append("bar");
-    try kv_array.append("baz");
-    try kv_array.append("qux");
+    try jet_kv.put(key, value);
 
-    try jet_kv.put(.array, "foo", kv_array);
+    try jet_kv.remove(key);
 
+    try std.testing.expect(try jet_kv.get(std.testing.allocator, key) == null);
+}
+
+test "append and popFirst a string array" {
+    var jet_kv = try JetKV.init(std.testing.allocator, .{});
+    defer jet_kv.deinit();
+
+    const key = "foo";
+    const array = &[_][]const u8{ "bar", "baz", "qux", "quux" };
+    for (array) |value| try jet_kv.append(key, value);
+
+    const popped = (try jet_kv.pop(std.testing.allocator, key)).?;
+    defer std.testing.allocator.free(popped);
+
+    try std.testing.expectEqualStrings("quux", popped);
+
+    for (&[_][]const u8{ "bar", "baz", "qux" }) |value| {
+        if (try jet_kv.popFirst(std.testing.allocator, key)) |capture| {
+            defer std.testing.allocator.free(capture);
+            try std.testing.expectEqualStrings(value, capture);
+        } else {
+            try std.testing.expect(false);
+        }
+    }
+
+    try std.testing.expect(try jet_kv.popFirst(std.testing.allocator, "foo") == null);
+}
+
+test "prepend a value in an array" {
+    var jet_kv = try JetKV.init(std.testing.allocator, .{});
+    defer jet_kv.deinit();
+
+    const array = &[_][]const u8{ "bar", "baz", "qux" };
+
+    for (array) |item| try jet_kv.append("foo", item);
     try jet_kv.prepend("foo", "quux");
 
-    if (jet_kv.get(.array, "foo")) |value| {
-        try std.testing.expectEqualDeep(&[_][]const u8{ "quux", "bar", "baz", "qux" }, value.items());
-    }
+    if (try jet_kv.popFirst(std.testing.allocator, "foo")) |value| {
+        defer std.testing.allocator.free(value);
+        try std.testing.expectEqualStrings("quux", value);
+    } else try std.testing.expect(false);
+
+    if (try jet_kv.popFirst(std.testing.allocator, "foo")) |value| {
+        defer std.testing.allocator.free(value);
+        try std.testing.expectEqualStrings("bar", value);
+    } else try std.testing.expect(false);
+
+    if (try jet_kv.popFirst(std.testing.allocator, "foo")) |value| {
+        defer std.testing.allocator.free(value);
+        try std.testing.expectEqualStrings("baz", value);
+    } else try std.testing.expect(false);
+
+    if (try jet_kv.popFirst(std.testing.allocator, "foo")) |value| {
+        defer std.testing.allocator.free(value);
+        try std.testing.expectEqualStrings("qux", value);
+    } else try std.testing.expect(false);
 }
 
 test "pop a value from an array" {
-    var jet_kv = JetKV.init(std.testing.allocator, .{});
+    var jet_kv = try JetKV.init(std.testing.allocator, .{});
     defer jet_kv.deinit();
 
-    var kv_array = Array.init(std.testing.allocator);
-    defer kv_array.deinit();
+    const array = &[_][]const u8{ "bar", "baz", "qux" };
 
-    try kv_array.append("bar");
-    try kv_array.append("baz");
-    try kv_array.append("qux");
+    for (array) |item| try jet_kv.append("foo", item);
 
-    try jet_kv.put(.array, "foo", kv_array);
-
-    if (jet_kv.pop("foo")) |string| {
+    if (try jet_kv.pop(std.testing.allocator, "foo")) |string| {
         try std.testing.expectEqualStrings("qux", string);
         defer std.testing.allocator.free(string);
     } else {
         try std.testing.expect(false);
     }
 
-    if (jet_kv.get(.array, "foo")) |value| {
-        try std.testing.expectEqualDeep(&[_][]const u8{ "bar", "baz" }, value.items());
+    if (try jet_kv.pop(std.testing.allocator, "foo")) |string| {
+        try std.testing.expectEqualStrings("baz", string);
+        defer std.testing.allocator.free(string);
+    } else {
+        try std.testing.expect(false);
     }
+
+    if (try jet_kv.pop(std.testing.allocator, "foo")) |string| {
+        try std.testing.expectEqualStrings("bar", string);
+        defer std.testing.allocator.free(string);
+    } else {
+        try std.testing.expect(false);
+    }
+}
+
+test "file-based storage" {
+    var jet_kv = try JetKV.init(undefined, .{ .backend = .file, .file_backend_options = .{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = FileBackend.addressSpace(1024),
+    } });
+    defer jet_kv.deinit();
+
+    const key = "foo";
+    const value = "bar";
+
+    try jet_kv.put(key, value);
+
+    if (try jet_kv.get(std.testing.allocator, key)) |capture| {
+        defer std.testing.allocator.free(capture);
+        try std.testing.expectEqualStrings(value, capture);
+    } else {
+        try std.testing.expect(false);
+    }
+
+    try std.testing.expect(try jet_kv.get(std.testing.allocator, "baz") == null);
 }
