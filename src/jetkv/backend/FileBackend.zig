@@ -116,6 +116,7 @@ pub fn put(self: *FileBackend, key: []const u8, value: []const u8) !void {
     defer self.mutex.unlock();
 
     try self.putString(key, value);
+    try self.sync();
 }
 
 /// Remove a String from the file-based backend.
@@ -126,6 +127,7 @@ pub fn remove(self: *FileBackend, key: []const u8) !void {
     defer self.mutex.unlock();
 
     try self.removeString(key);
+    try self.sync();
 }
 
 /// Remove a String from the file-based backend and return it if found.
@@ -137,6 +139,7 @@ pub fn fetchRemove(self: *FileBackend, allocator: std.mem.Allocator, key: []cons
 
     return if (try self.getString(allocator, key)) |capture| blk: {
         try self.removeString(key);
+        try self.sync();
         break :blk capture;
     } else null;
 }
@@ -168,6 +171,7 @@ pub fn prepend(self: *FileBackend, key: []const u8, value: []const u8) !void {
         try self.createArray(index, key, value, .{ .linked = false });
         try self.incRefCount();
     }
+    try self.sync();
 }
 
 /// Pop a String from the end of an Array in the file-based backend.
@@ -176,19 +180,21 @@ pub fn pop(self: *FileBackend, allocator: std.mem.Allocator, key: []const u8) !?
     defer self.mutex.unlock();
 
     const index = try self.locate(key);
-    if (try self.readIndexAddress(index)) |address| {
+    const value = if (try self.readIndexAddress(index)) |address| blk: {
         var key_buf: [max_key_len]u8 = undefined;
         const item = try self.readItem(address, &key_buf);
         if (std.mem.eql(u8, item.key, key)) {
             // No collision
-            return try self.popIndexed(allocator, item, &key_buf);
+            break :blk try self.popIndexed(allocator, item, &key_buf);
         } else {
             // Collision
-            return try self.popLinked(allocator, item, key, &key_buf);
+            break :blk try self.popLinked(allocator, item, key, &key_buf);
         }
-    } else {
-        return null;
-    }
+    } else null;
+
+    try self.sync();
+
+    return value;
 }
 
 /// Pop a String from the start of an Array in the file-based backend.
@@ -198,37 +204,21 @@ pub fn popFirst(self: *FileBackend, allocator: std.mem.Allocator, key: []const u
 
     var key_buf: [max_key_len]u8 = undefined;
     const index = try self.locate(key);
-    if (try self.readIndexAddress(index)) |address| {
+    const value = if (try self.readIndexAddress(index)) |address| blk: {
         if (address.type != .array) return null;
 
         const item = try self.readItem(address, &key_buf);
         if (std.mem.eql(u8, item.key, key)) {
             // No collision
-            return try self.popFirstIndexed(allocator, index, item);
+            break :blk try self.popFirstIndexed(allocator, index, item);
         } else {
             // Collision
-            return try self.popFirstLinked(allocator, item, key, &key_buf);
+            break :blk try self.popFirstLinked(allocator, item, key, &key_buf);
         }
-    } else return null;
-}
+    } else null;
 
-fn shrinkArray(self: FileBackend, first_item_address: Address, last_item_address: Address) !void {
-    if (last_item_address.array_previous_location) |previous_location| {
-        // Nullify next item pointer for next-to-last item, update end location to
-        // next-to-last item
-        var location_buf: [bufSize(u32)]u8 = undefined;
-        serialize(u32, 0, &location_buf);
-        try self.file.seekTo(previous_location + array_next_location_offset);
-        try self.file.writeAll(&location_buf);
-
-        try self.updateAddress(
-            first_item_address.location,
-            .{ .array_end_location = .{ .value = last_item_address.array_previous_location.? } },
-        );
-    } else {
-        // We reached the first item
-        try self.updateAddress(first_item_address.location, .{ .array_end_location = .{ .value = 0 } });
-    }
+    try self.sync();
+    return value;
 }
 
 fn popIndexed(
@@ -321,7 +311,7 @@ fn popFirstIndexed(
         // Maintain possible next linked item
         try self.updateAddress(
             array_next_location,
-            .{ .linked_next_location = .{ .value = item.address.linked_next_location } },
+            .{ .array_end_location = .{ .value = item.address.array_end_location }, .linked_next_location = .{ .value = item.address.linked_next_location } },
         );
     } else {
         try self.updateLocation(index, null);
@@ -374,6 +364,26 @@ fn prependLinked(
     // linked list
     try self.createArray(previous_item.address.location, key, value, .{ .linked = true });
     try self.incRefCount();
+}
+
+// Drop one item the end of an array and update end location.
+fn shrinkArray(self: FileBackend, first_item_address: Address, last_item_address: Address) !void {
+    if (last_item_address.array_previous_location) |previous_location| {
+        // Nullify next item pointer for next-to-last item, update end location to
+        // next-to-last item
+        var location_buf: [bufSize(u32)]u8 = undefined;
+        serialize(u32, 0, &location_buf);
+        try self.file.seekTo(previous_location + array_next_location_offset);
+        try self.file.writeAll(&location_buf);
+
+        try self.updateAddress(
+            first_item_address.location,
+            .{ .array_end_location = .{ .value = last_item_address.array_previous_location.? } },
+        );
+    } else {
+        // We reached the first item
+        try self.updateAddress(first_item_address.location, .{ .array_end_location = .{ .value = 0 } });
+    }
 }
 
 // Initialize address space with zeroes.
@@ -433,7 +443,11 @@ fn getEndPos(self: FileBackend) !u32 {
 }
 
 fn setEndPos(self: FileBackend, location: u32) !void {
-    return try self.file.setEndPos(location);
+    try self.file.setEndPos(location);
+}
+
+fn sync(self: FileBackend) !void {
+    try self.file.sync();
 }
 
 // Truncate the file if the given address + key/value reaches EOF.
@@ -516,9 +530,11 @@ pub fn append(self: *FileBackend, key: []const u8, value: []const u8) !void {
             // No collision
             try self.appendItemToExistingArray(address, key, value);
             try self.incRefCount();
+            return;
         } else if (is_equal) {
             // Overwrite string/re-use empty array
             try self.createArray(index, key, value, .{ .linked = false });
+            return;
         } else {
             // Collision
             var it = self.linkedListIterator(item.address, &key_buf);
@@ -532,14 +548,9 @@ pub fn append(self: *FileBackend, key: []const u8, value: []const u8) !void {
                     return;
                 } else if (is_equal_key and item.address.type == .string) {
                     // Overwrite string value
-                    try self.updateAddress(linked_item.address.location, .{ .type = .array });
-                    try self.createArray(
-                        linked_item.address.location,
-                        key,
-                        value,
-                        .{ .linked = false },
-                    );
-                    break;
+                    try self.updateAddress(previous_item.address.location, .{ .type = .array });
+                    try self.createArray(previous_item.address.location, key, value, .{ .linked = true });
+                    return;
                 } else if (is_equal_key) unreachable;
 
                 previous_item = linked_item;
@@ -1400,6 +1411,7 @@ test "array prepend/popFirst" {
     }
     try std.testing.expect(try backend.popFirst(std.testing.allocator, "array") == null);
 }
+
 test "array append-pop-append-pop-append-pop" {
     var backend = try FileBackend.init(.{
         .path = "/tmp/jetkv.db",
@@ -1519,7 +1531,9 @@ test "many append and popFirst" {
     });
     defer backend.deinit();
 
-    @setEvalBranchQuota(2000);
+    const initial_size = try backend.file.getEndPos();
+
+    @setEvalBranchQuota(2001);
 
     const keypairs = @import("../../tests/keypairs.zig").keypairs;
 
@@ -1532,6 +1546,35 @@ test "many append and popFirst" {
         defer std.testing.allocator.free(value);
         try std.testing.expectEqualStrings(keypair[0], value);
     }
+
+    try std.testing.expectEqual(initial_size, try backend.file.getEndPos());
+}
+
+test "many prepend and popFirst" {
+    var backend = try FileBackend.init(.{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = bufSize(u32) * 1024,
+        .truncate = true,
+    });
+    defer backend.deinit();
+
+    const initial_size = try backend.file.getEndPos();
+
+    @setEvalBranchQuota(2001);
+
+    const keypairs = @import("../../tests/keypairs.zig").keypairs;
+
+    inline for (keypairs) |keypair| {
+        try backend.prepend("array", keypair[0]);
+    }
+
+    inline for (0..keypairs.len) |index| {
+        const value = (try backend.popFirst(std.testing.allocator, "array")).?;
+        defer std.testing.allocator.free(value);
+        try std.testing.expectEqualStrings(keypairs[keypairs.len - index - 1][0], value);
+    }
+
+    try std.testing.expectEqual(initial_size, try backend.file.getEndPos());
 }
 
 test "many append and pop" {
@@ -1542,7 +1585,9 @@ test "many append and pop" {
     });
     defer backend.deinit();
 
-    @setEvalBranchQuota(2000);
+    const initial_size = try backend.file.getEndPos();
+
+    @setEvalBranchQuota(2001);
 
     const keypairs = @import("../../tests/keypairs.zig").keypairs;
 
@@ -1550,11 +1595,40 @@ test "many append and pop" {
         try backend.append("array", keypair[0]);
     }
 
-    inline for (1..keypairs.len - 1) |index| {
+    inline for (0..keypairs.len) |index| {
         const value = (try backend.pop(std.testing.allocator, "array")).?;
         defer std.testing.allocator.free(value);
-        try std.testing.expectEqualStrings(keypairs[keypairs.len - index][0], value);
+        try std.testing.expectEqualStrings(keypairs[keypairs.len - index - 1][0], value);
     }
+
+    try std.testing.expectEqual(initial_size, try backend.file.getEndPos());
+}
+
+test "many prepend and pop" {
+    var backend = try FileBackend.init(.{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = bufSize(u32) * 1024,
+        .truncate = true,
+    });
+    defer backend.deinit();
+
+    const initial_size = try backend.file.getEndPos();
+
+    @setEvalBranchQuota(2001);
+
+    const keypairs = @import("../../tests/keypairs.zig").keypairs;
+
+    inline for (keypairs) |keypair| {
+        try backend.prepend("array", keypair[0]);
+    }
+
+    inline for (keypairs) |keypair| {
+        const value = (try backend.pop(std.testing.allocator, "array")).?;
+        defer std.testing.allocator.free(value);
+        try std.testing.expectEqualStrings(keypair[0], value);
+    }
+
+    try std.testing.expectEqual(initial_size, try backend.file.getEndPos());
 }
 
 test "put string, overwrite array" {
