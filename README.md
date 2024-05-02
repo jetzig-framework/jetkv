@@ -56,6 +56,8 @@ var kv = try JetKV.init(
 
 All operations are identical for `.file` and `.memory` backends.
 
+All operations are _O(1)_ complexity for both backends.
+
 ```zig
 // Put some strings into the KV store
 try kv.put("foo", "baz");
@@ -87,6 +89,38 @@ if (kv.popFirst(allocator, "example_array")) |value| {
     allocator.free(value);
 }
 ```
+
+## Implementation
+
+### Memory
+
+The memory backend uses a _Zig_ `std.StringHashMap` of `[]const u8` for string storage and `std.DoublyLinkedList([]const u8)` for array storage.
+
+### File
+
+The file backend implements a fixed-sized hash table at the beginning of the file.
+
+Hash collisions are resolved as singly-linked lists. Arrays are implemented as doubly-linked lists.
+
+Each index in the hash table references a location in the file which provides address information:
+
+* Value type
+* Next linked item (for collision resolution)
+* Next array item
+* Previous array item
+* End array item
+* Key length
+* Initial key length
+* Value length
+* Initial value length
+* Key
+* Value
+
+Values are inserted with a relative amount of over-allocation to allow re-use of space when replacing values.
+
+Keys have a maximum length of `1024` bytes in order to allow key comparison to operate exclusively on the stack.
+
+Reference counting is used to allow truncating the file when the store becomes empty.
 
 ## License
 
