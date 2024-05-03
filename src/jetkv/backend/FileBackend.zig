@@ -635,6 +635,7 @@ fn prependItemToExistingArray(
     // Update previous item pointer for previous item
     try self.updateAddress(address.location, .{
         .array_previous_location = .{ .value = end_pos },
+        .array_end_location = .none,
     });
 
     serialize(Address, new_address, &address_buf);
