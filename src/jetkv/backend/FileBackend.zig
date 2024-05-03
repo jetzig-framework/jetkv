@@ -15,7 +15,7 @@ const hasher = std.hash.XxHash32.hash;
 
 const ValueType = enum(u8) { string, array };
 
-const Address = struct {
+const AddressInfo = struct {
     type: ValueType,
     location: u32, // Not serialized
     linked_next_location: ?u32 = null, // Linked lists for collisions
@@ -30,7 +30,7 @@ const Address = struct {
 
 const Item = struct {
     key: []const u8,
-    address: Address,
+    address: AddressInfo,
     file_backend: FileBackend,
 
     pub fn value(self: Item, allocator: std.mem.Allocator) ![]const u8 {
@@ -47,7 +47,7 @@ const TypedLocation = struct {
 
 const TypedAddress = struct {
     type: LocationType,
-    address: Address,
+    address: AddressInfo,
 };
 
 const Header = struct {
@@ -367,7 +367,7 @@ fn prependLinked(
 }
 
 // Drop one item the end of an array and update end location.
-fn shrinkArray(self: FileBackend, first_item_address: Address, last_item_address: Address) !void {
+fn shrinkArray(self: FileBackend, first_item_address: AddressInfo, last_item_address: AddressInfo) !void {
     if (last_item_address.array_previous_location) |previous_location| {
         // Nullify next item pointer for next-to-last item, update end location to
         // next-to-last item
@@ -451,14 +451,14 @@ fn sync(self: FileBackend) !void {
 }
 
 // Truncate the file if the given address + key/value reaches EOF.
-fn maybeTruncate(self: FileBackend, address: Address) !void {
+fn maybeTruncate(self: FileBackend, address: AddressInfo) !void {
     if (address.linked_next_location) |next_location| {
         if (try self.readAddress(next_location)) |_| return; // We need to retain the link
     }
     if (try self.isTerminatingAddress(address)) try self.setEndPos(address.location);
 }
 
-fn isTerminatingAddress(self: FileBackend, address: Address) !bool {
+fn isTerminatingAddress(self: FileBackend, address: AddressInfo) !bool {
     const address_end = address.location + address_len + address.max_key_len + address.max_value_len;
     return address_end == try self.getEndPos();
 }
@@ -576,7 +576,7 @@ fn createArray(self: FileBackend, index: u32, key: []const u8, value: []const u8
 
     const end_pos = try self.getEndPos();
     const address = makeAddress(.array, .{ .location = end_pos, .key = key, .value = value });
-    serialize(Address, address, &address_buf);
+    serialize(AddressInfo, address, &address_buf);
 
     try self.updateLocation(index + if (options.linked) linked_next_location_offset else 0, end_pos);
 
@@ -588,7 +588,7 @@ fn createArray(self: FileBackend, index: u32, key: []const u8, value: []const u8
 
 fn appendItemToExistingArray(
     self: FileBackend,
-    address: Address,
+    address: AddressInfo,
     key: []const u8,
     value: []const u8,
 ) !void {
@@ -606,7 +606,7 @@ fn appendItemToExistingArray(
         .value = value,
     });
 
-    serialize(Address, new_address, &address_buf);
+    serialize(AddressInfo, new_address, &address_buf);
     try self.file.seekTo(end_pos);
     try self.file.writeAll(&address_buf);
     try self.file.writeAll(key);
@@ -617,7 +617,7 @@ fn appendItemToExistingArray(
 
 fn prependItemToExistingArray(
     self: FileBackend,
-    address: Address,
+    address: AddressInfo,
     key: []const u8,
     value: []const u8,
 ) !u32 {
@@ -638,7 +638,7 @@ fn prependItemToExistingArray(
         .array_end_location = .none,
     });
 
-    serialize(Address, new_address, &address_buf);
+    serialize(AddressInfo, new_address, &address_buf);
     try self.file.seekTo(end_pos);
     try self.file.writeAll(&address_buf);
     try self.file.writeAll(key);
@@ -715,7 +715,7 @@ fn updateAddress(self: FileBackend, location: u32, options: AddressUpdateOptions
     }
 }
 
-fn readIndexAddress(self: FileBackend, index: u32) !?Address {
+fn readIndexAddress(self: FileBackend, index: u32) !?AddressInfo {
     if (try self.readLocation(index)) |location| {
         return try self.readAddress(location);
     } else {
@@ -723,7 +723,7 @@ fn readIndexAddress(self: FileBackend, index: u32) !?Address {
     }
 }
 
-fn readAddress(self: FileBackend, location: u32) !?Address {
+fn readAddress(self: FileBackend, location: u32) !?AddressInfo {
     // TODO: Save a few bytes by using different address formats for strings and arrays
     try self.file.seekTo(location);
     var buf: [address_len]u8 = undefined;
@@ -762,7 +762,7 @@ fn writeString(self: FileBackend, index: u32, key: []const u8, value: []const u8
 
     var address_buf: [address_len]u8 = undefined;
     serialize(
-        Address,
+        AddressInfo,
         .{
             .type = .string,
             .location = end_pos,
@@ -804,7 +804,7 @@ fn updateString(self: FileBackend, item: Item, key: []const u8, value: []const u
     try self.file.seekTo(item.address.location);
     var address_buf: [address_len]u8 = undefined;
     serialize(
-        Address,
+        AddressInfo,
         .{
             .type = .string,
             .linked_next_location = item.address.linked_next_location,
@@ -862,8 +862,8 @@ fn removeLinkedString(self: FileBackend, item: Item, key: []const u8) !void {
 }
 fn updateLinkedString(
     self: FileBackend,
-    previous_address: Address,
-    address: Address,
+    previous_address: AddressInfo,
+    address: AddressInfo,
     key: []const u8,
     value: []const u8,
 ) !void {
@@ -875,7 +875,7 @@ fn updateLinkedString(
 
     var new_address_buf: [address_len]u8 = undefined;
     serialize(
-        Address,
+        AddressInfo,
         .{
             .type = .string,
             .location = end_pos,
@@ -901,7 +901,7 @@ fn updateLinkedString(
     try self.file.writeAll(value);
 }
 
-fn readItem(self: FileBackend, address: Address, key_buf: *[max_key_len]u8) !Item {
+fn readItem(self: FileBackend, address: AddressInfo, key_buf: *[max_key_len]u8) !Item {
     try self.file.seekTo(address.location + address_len);
     _ = try self.file.readAll(key_buf[0..address.key_len]);
 
@@ -912,7 +912,7 @@ fn readItem(self: FileBackend, address: Address, key_buf: *[max_key_len]u8) !Ite
     };
 }
 
-fn readValue(self: FileBackend, allocator: std.mem.Allocator, address: Address) ![]const u8 {
+fn readValue(self: FileBackend, allocator: std.mem.Allocator, address: AddressInfo) ![]const u8 {
     const value = try allocator.alloc(u8, @intCast(address.value_len));
     try self.file.seekTo(address.location + address_len + address.key_len);
     _ = try self.file.readAll(value);
@@ -920,7 +920,7 @@ fn readValue(self: FileBackend, allocator: std.mem.Allocator, address: Address) 
 }
 
 const LinkedListIterator = struct {
-    address: ?Address,
+    address: ?AddressInfo,
     file_backend: FileBackend,
     key_buf: *[max_key_len]u8,
 
@@ -939,7 +939,7 @@ const LinkedListIterator = struct {
     }
 };
 
-fn linkedListIterator(self: FileBackend, address: Address, key_buf: *[max_key_len]u8) LinkedListIterator {
+fn linkedListIterator(self: FileBackend, address: AddressInfo, key_buf: *[max_key_len]u8) LinkedListIterator {
     return .{ .address = address, .file_backend = self, .key_buf = key_buf };
 }
 
@@ -959,7 +959,7 @@ const AddressParams = struct {
     max_value_len: ?u32 = null,
 };
 
-fn makeAddress(value_type: ValueType, params: AddressParams) Address {
+fn makeAddress(value_type: ValueType, params: AddressParams) AddressInfo {
     const array_end_location = switch (value_type) {
         .string => null,
         .array => switch (params.array_end) {
@@ -1006,7 +1006,7 @@ fn serialize(T: type, value: T, buf: *[bufSize(T)]u8) void {
     switch (T) {
         u8, u16, u32 => std.mem.writeInt(T, buf, value, endian),
         ?u32 => std.mem.writeInt(u32, buf, value orelse 0, endian),
-        Address => {
+        AddressInfo => {
             serialize(ValueType, value.type, buf[0..1]);
             serialize(?u32, value.linked_next_location, buf[1..5]);
             serialize(?u32, value.array_next_location, buf[5..9]);
@@ -1044,7 +1044,7 @@ fn bufSize(T: type) u32 {
     return switch (T) {
         u8, u16, u32 => @divExact(@typeInfo(T).Int.bits, 8),
         ?u32 => @divExact(@typeInfo(u32).Int.bits, 8),
-        Address => address_len,
+        AddressInfo => address_len,
         Header => header_len,
         ValueType => bufSize(u8),
         AddressUpdateOptions.AddressUpdateLocationValue => bufSize(u32),
@@ -1052,7 +1052,7 @@ fn bufSize(T: type) u32 {
     };
 }
 
-fn isOverwrite(address: Address, key: []const u8, value: []const u8) bool {
+fn isOverwrite(address: AddressInfo, key: []const u8, value: []const u8) bool {
     return key.len <= address.max_key_len and value.len <= address.max_value_len;
 }
 
