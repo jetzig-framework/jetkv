@@ -767,7 +767,7 @@ fn writeString(self: FileBackend, index: u32, key: []const u8, value: []const u8
             .type = .string,
             .location = end_pos,
             .key_len = @intCast(key.len),
-            .value_len = value.len,
+            .value_len = @intCast(value.len),
             .max_key_len = @intCast(key.len),
             .max_value_len = max_value_len,
         },
@@ -796,7 +796,7 @@ inline fn bandedValueLength(value: []const u8) u32 {
     else if (value.len <= 8192)
         8192
     else
-        value.len;
+        @intCast(value.len);
 }
 
 // Update a string in place - assume key and value lengths are within existing key and value bounds.
@@ -810,7 +810,7 @@ fn updateString(self: FileBackend, item: Item, key: []const u8, value: []const u
             .linked_next_location = item.address.linked_next_location,
             .location = item.address.location,
             .key_len = @intCast(key.len),
-            .value_len = value.len,
+            .value_len = @intCast(value.len),
             .max_key_len = item.address.max_key_len,
             .max_value_len = item.address.max_value_len,
         },
@@ -880,10 +880,10 @@ fn updateLinkedString(
             .type = .string,
             .location = end_pos,
             .key_len = @intCast(key.len),
-            .value_len = value.len,
+            .value_len = @intCast(value.len),
             .linked_next_location = address.linked_next_location,
             .max_key_len = if (is_overwrite) address.max_key_len else @intCast(key.len),
-            .max_value_len = if (is_overwrite) address.max_value_len else value.len,
+            .max_value_len = if (is_overwrite) address.max_value_len else @intCast(value.len),
         },
         &new_address_buf,
     );
@@ -977,9 +977,9 @@ fn makeAddress(value_type: ValueType, params: AddressParams) AddressInfo {
         .array_next_location = params.array_next_location,
         .array_end_location = array_end_location,
         .key_len = @intCast(params.key.len),
-        .value_len = params.value.len,
+        .value_len = @intCast(params.value.len),
         .max_key_len = params.max_key_len orelse @intCast(params.key.len),
-        .max_value_len = params.max_value_len orelse params.value.len,
+        .max_value_len = params.max_value_len orelse @intCast(params.value.len),
     };
 }
 
