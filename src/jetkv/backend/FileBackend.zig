@@ -185,6 +185,7 @@ pub fn pop(self: *FileBackend, allocator: std.mem.Allocator, key: []const u8) !?
         const item = try self.readItem(address, &key_buf);
         if (std.mem.eql(u8, item.key, key)) {
             // No collision
+            if (address.type != .array) return null;
             break :blk try self.popIndexed(allocator, item, &key_buf);
         } else {
             // Collision
@@ -205,10 +206,9 @@ pub fn popFirst(self: *FileBackend, allocator: std.mem.Allocator, key: []const u
     var key_buf: [max_key_len]u8 = undefined;
     const index = try self.locate(key);
     const value = if (try self.readIndexAddress(index)) |address| blk: {
-        if (address.type != .array) return null;
-
         const item = try self.readItem(address, &key_buf);
         if (std.mem.eql(u8, item.key, key)) {
+            if (address.type != .array) return null;
             // No collision
             break :blk try self.popFirstIndexed(allocator, index, item);
         } else {
@@ -281,8 +281,8 @@ fn popFirstLinked(self: FileBackend, allocator: std.mem.Allocator, item: Item, k
     var previous_item = item;
 
     while (try it.next()) |linked_item| {
-        const is_equal_key = std.mem.eql(u8, item.key, key);
-        if (is_equal_key and item.address.type == .array) {
+        const is_equal_key = std.mem.eql(u8, linked_item.key, key);
+        if (is_equal_key and linked_item.address.type == .array) {
             if (linked_item.address.array_next_location) |next_location| {
                 try self.updateAddress(
                     previous_item.address.location,
@@ -332,8 +332,8 @@ fn prependLinked(
     var previous_item = item;
 
     while (try it.next()) |linked_item| {
-        const is_equal_key = std.mem.eql(u8, item.key, key);
-        if (is_equal_key and item.address.type == .array) {
+        const is_equal_key = std.mem.eql(u8, linked_item.key, key);
+        if (is_equal_key and linked_item.address.type == .array) {
             const location = try self.prependItemToExistingArray(
                 linked_item.address,
                 key,
@@ -541,8 +541,8 @@ pub fn append(self: *FileBackend, key: []const u8, value: []const u8) !void {
             var previous_item = item;
 
             while (try it.next()) |linked_item| {
-                const is_equal_key = std.mem.eql(u8, item.key, key);
-                if (is_equal_key and item.address.type == .array) {
+                const is_equal_key = std.mem.eql(u8, linked_item.key, key);
+                if (is_equal_key and linked_item.address.type == .array) {
                     try self.appendItemToExistingArray(linked_item.address, key, value);
                     try self.incRefCount();
                     return;
@@ -831,7 +831,7 @@ fn writeLinkedString(self: FileBackend, item: Item, key: []const u8, value: []co
     var previous_item = item;
 
     while (try it.next()) |linked_item| {
-        if (std.mem.eql(u8, item.key, key)) {
+        if (std.mem.eql(u8, linked_item.key, key)) {
             try self.updateLinkedString(previous_item.address, linked_item.address, key, value);
             return;
         }
@@ -851,7 +851,7 @@ fn removeLinkedString(self: FileBackend, item: Item, key: []const u8) !void {
     var previous_item = item;
 
     while (try it.next()) |linked_item| {
-        if (std.mem.eql(u8, item.key, key)) {
+        if (std.mem.eql(u8, linked_item.key, key)) {
             try self.updateAddress(previous_item.address.location, .{ .linked_next_location = .none });
             try self.decRefCount();
             return;
@@ -1676,4 +1676,67 @@ test "put string, pop array" {
     try backend.put("foo", "baz");
 
     try std.testing.expect(try backend.pop(std.testing.allocator, "foo") == null);
+}
+
+test "bug: previous value returned for overwritten key" {
+    var backend = try FileBackend.init(.{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = bufSize(u32) * 1024,
+        .truncate = true,
+    });
+    defer backend.deinit();
+    try backend.put("ka", "spam");
+    try backend.put("1", "eggs");
+    try backend.put("1", "jetkv");
+
+    const value = try backend.get(std.testing.allocator, "1");
+    defer std.testing.allocator.free(value.?);
+    try std.testing.expectEqualStrings("jetkv", value.?);
+}
+
+test "bug: stale value returned for deleted key" {
+    var backend = try FileBackend.init(.{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = bufSize(u32) * 1024,
+        .truncate = true,
+    });
+    defer backend.deinit();
+    try backend.put("fnIEV", "spam");
+    try backend.put("7", "eggs");
+    try backend.remove("7");
+
+    const value = try backend.get(std.testing.allocator, "7");
+    try std.testing.expect(value == null);
+}
+
+test "bug: pop collisions" {
+    var backend = try FileBackend.init(.{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = bufSize(u32) * 1,
+        .truncate = true,
+    });
+    defer backend.deinit();
+    try backend.put("foo", "bar");
+    try backend.put("bar", "baz");
+    try backend.append("qux", "quux");
+
+    const value = try backend.pop(std.testing.allocator, "qux");
+    defer std.testing.allocator.free(value.?);
+    try std.testing.expectEqualStrings("quux", value.?);
+}
+
+test "bug: popFirst collisions" {
+    var backend = try FileBackend.init(.{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = bufSize(u32) * 1,
+        .truncate = true,
+    });
+    defer backend.deinit();
+    try backend.put("foo", "bar");
+    try backend.put("bar", "baz");
+    try backend.append("qux", "quux");
+
+    const value = try backend.popFirst(std.testing.allocator, "qux");
+    defer std.testing.allocator.free(value.?);
+    try std.testing.expectEqualStrings("quux", value.?);
 }
