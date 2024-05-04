@@ -13,7 +13,7 @@ const FileBackend = @This();
 
 const hasher = std.hash.XxHash32.hash;
 
-const ValueType = enum(u8) { string, array };
+const ValueType = enum(u8) { string, array, inactive };
 
 const AddressInfo = struct {
     type: ValueType,
@@ -508,7 +508,8 @@ fn removeString(self: FileBackend, key: []const u8) !void {
         var key_buf: [max_key_len]u8 = undefined;
         const item = try self.readItem(address, &key_buf);
         if (std.mem.eql(u8, item.key, key)) {
-            try self.updateLocation(index, address.linked_next_location); // can be null
+            try self.updateAddress(index, .{ .type = .inactive });
+            // try self.updateLocation(index, address.linked_next_location); // can be null
             try self.decRefCount();
         } else {
             try self.removeLinkedString(item, key);
@@ -551,13 +552,21 @@ pub fn append(self: *FileBackend, key: []const u8, value: []const u8) !void {
                     try self.updateAddress(previous_item.address.location, .{ .type = .array });
                     try self.createArray(previous_item.address.location, key, value, .{ .linked = true });
                     return;
+                } else if (is_equal_key and item.address.type == .inactive) {
+                    if (isOverwrite(previous_item.address, key, value)) {
+                        // Overwrite unused value
+                        try self.updateAddress(previous_item.address.location, .{ .type = .array });
+                        try self.createArray(previous_item.address.location, key, value, .{ .linked = true });
+                        try self.incRefCount();
+                        return;
+                    }
                 } else if (is_equal_key) unreachable;
 
                 previous_item = linked_item;
             }
 
-            // No matches in linked list - create new array at EOF and link to final item in
-            // linked list
+            // No matches in linked list or not enough space in inactive value - create new array
+            // at EOF and link to final item in linked list
             try self.createArray(previous_item.address.location, key, value, .{ .linked = true });
             try self.incRefCount();
         }
@@ -967,6 +976,7 @@ fn makeAddress(value_type: ValueType, params: AddressParams) AddressInfo {
             .default => params.location,
             .location => |location| location,
         },
+        .inactive => null,
     };
 
     return .{
