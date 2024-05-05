@@ -491,13 +491,13 @@ fn putString(self: FileBackend, key: []const u8, value: []const u8) !void {
             if (key.len <= item.address.max_key_len and value.len <= item.address.max_value_len) {
                 try self.updateString(item, key, value);
             } else {
-                try self.writeString(index, key, value);
+                try self.writeString(index, item.address, key, value);
             }
         } else {
             try self.writeLinkedString(item, key, value);
         }
     } else {
-        try self.writeString(index, key, value);
+        try self.writeString(index, null, key, value);
         try self.incRefCount();
     }
 }
@@ -750,7 +750,13 @@ fn readAddress(self: FileBackend, location: u32) !?AddressInfo {
 // Write a string to the end of the file, update index to point to new location.
 // `index` can be either a location in the main index or the location of an address's next item
 // pointer.
-fn writeString(self: FileBackend, index: u32, key: []const u8, value: []const u8) !void {
+fn writeString(
+    self: FileBackend,
+    index: u32,
+    maybe_address_info: ?AddressInfo,
+    key: []const u8,
+    value: []const u8,
+) !void {
     const end_pos = try self.getEndPos();
 
     var location_buf: [bufSize(u32)]u8 = undefined;
@@ -770,6 +776,10 @@ fn writeString(self: FileBackend, index: u32, key: []const u8, value: []const u8
             .value_len = @intCast(value.len),
             .max_key_len = @intCast(key.len),
             .max_value_len = max_value_len,
+            .linked_next_location = if (maybe_address_info) |address_info|
+                address_info.linked_next_location
+            else
+                null,
         },
         &address_buf,
     );
@@ -840,8 +850,7 @@ fn writeLinkedString(self: FileBackend, item: Item, key: []const u8, value: []co
     }
 
     // Write string using the final item's next item pointer as index
-    // Next item pointer starts at byte #2
-    try self.writeString(previous_item.address.location + linked_next_location_offset, key, value);
+    try self.writeString(previous_item.address.location + linked_next_location_offset, null, key, value);
     try self.incRefCount();
 }
 
@@ -852,7 +861,15 @@ fn removeLinkedString(self: FileBackend, item: Item, key: []const u8) !void {
 
     while (try it.next()) |linked_item| {
         if (std.mem.eql(u8, linked_item.key, key)) {
-            try self.updateAddress(previous_item.address.location, .{ .linked_next_location = .none });
+            const T = AddressUpdateOptions.AddressUpdateLocationValue;
+            const linked_next_location: T = if (linked_item.address.linked_next_location) |location|
+                .{ .value = location }
+            else
+                .none;
+            try self.updateAddress(
+                previous_item.address.location,
+                .{ .linked_next_location = linked_next_location },
+            );
             try self.decRefCount();
             return;
         }
@@ -889,10 +906,10 @@ fn updateLinkedString(
     );
 
     if (!is_overwrite) {
-        var next_location_buf: [bufSize(u32)]u8 = undefined;
-        serialize(u32, end_pos, &next_location_buf);
-        try self.file.seekTo(previous_address.location + linked_next_location_offset);
-        _ = try self.file.writeAll(&next_location_buf);
+        try self.updateAddress(
+            previous_address.location,
+            .{ .linked_next_location = .{ .value = end_pos } },
+        );
     }
 
     try self.file.seekTo(end_pos);
@@ -1739,4 +1756,39 @@ test "bug: popFirst collisions" {
     const value = try backend.popFirst(std.testing.allocator, "qux");
     defer std.testing.allocator.free(value.?);
     try std.testing.expectEqualStrings("quux", value.?);
+}
+
+test "bug: linked string removal" {
+    var backend = try FileBackend.init(.{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = bufSize(u32) * 64,
+        .truncate = true,
+    });
+    defer backend.deinit();
+
+    try backend.put("rYpIf4P", "spam");
+    try backend.put("MP", "spam");
+    try backend.put("q", "spam");
+    try backend.remove("MP");
+
+    const value = try backend.get(std.testing.allocator, "q");
+    defer std.testing.allocator.free(value.?);
+    try std.testing.expectEqualStrings("spam", value.?);
+}
+
+test "bug: replace first string in linked list with insufficient space for overwrite" {
+    var backend = try FileBackend.init(.{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = bufSize(u32) * 1,
+        .truncate = true,
+    });
+    defer backend.deinit();
+
+    try backend.put("J", "spam");
+    try backend.put("j", "spam");
+    try backend.put("J", "LbTHW3x0R7xhTpJOdBRS0xxHHseFh8eGSZ7beYzpeJpAKYI20m_llAFJf5E9ChcnIBRlMvL3vAsSI0InrZ2jDsDdxLsgzmPL7fKTTvkQpDj4PUZ0ezUjFFgIopzoY4DpjdC6sEmp3xWZMWeyWLyvrnO1B6nMTAS97nPGVGIMIEg8ClQnbB8rLafIYLq4NRcWW1ovw9l7FiuiHk089gOTOi5fjgiflDSXUgiwRIZ6j4VQmbKgQ8PCqNn64N5s9u1_cminIG_4mvNz6K8mCsu_6xKXa4hobCTMOZnNcSo68QW1JyVfT8uaUWascE3LbVTyOOCAhs89K_y");
+
+    const value = try backend.get(std.testing.allocator, "j");
+    defer std.testing.allocator.free(value.?);
+    try std.testing.expectEqualStrings("spam", value.?);
 }
