@@ -58,6 +58,8 @@ All operations are identical for `.file` and `.memory` backends.
 
 All operations are _O(1)_ complexity for both backends.
 
+Read operations receive an allocator to allow separation of internal allocation and value reads. e.g. you may want to use one allocator for the KV store's internal storage and an arena allocator for reading values.
+
 ```zig
 // Put some strings into the KV store
 try kv.put("foo", "baz");
@@ -77,6 +79,7 @@ if (try kv.fetchRemove(allocator, "bar")) |value| {
     allocator.free(value);
 }
 
+// Remove a string from the KV store. Does not remove arrays.
 try kv.remove("foo");
 
 if (kv.pop(allocator, "example_array")) |value| {
