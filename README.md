@@ -30,7 +30,7 @@ var kv = try JetKV.init(allocator, .{ .backend = .memory });
 
 ### File Allocator
 
-The file allocator receives an allocator but does not perform any allocations. It is therefore possible to pass `undefined` instead of an allocator when using the file allocator.
+When using the file allocator, `JetKV.init` receives an allocator in order to provide a consistent API but does not perform any allocations. It is therefore possible to pass `undefined` instead of an allocator when using the file allocator.
 
 The file passed as the `path` field is locked on startup.
 
