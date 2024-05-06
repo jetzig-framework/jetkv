@@ -546,7 +546,7 @@ pub fn append(self: *FileBackend, key: []const u8, value: []const u8) !void {
                     try self.appendItemToExistingArray(linked_item.address, key, value);
                     try self.incRefCount();
                     return;
-                } else if (is_equal_key and item.address.type == .string) {
+                } else if (is_equal_key and linked_item.address.type == .string) {
                     // Overwrite string value
                     try self.updateAddress(previous_item.address.location, .{ .type = .array });
                     try self.createArray(previous_item.address.location, key, value, .{ .linked = true });
@@ -1791,4 +1791,29 @@ test "bug: replace first string in linked list with insufficient space for overw
     const value = try backend.get(std.testing.allocator, "j");
     defer std.testing.allocator.free(value.?);
     try std.testing.expectEqualStrings("spam", value.?);
+}
+
+test "bug: overwrite linked string with array" {
+    var backend = try FileBackend.init(.{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = bufSize(u32) * 1,
+        .truncate = true,
+    });
+    defer backend.deinit();
+
+    try backend.append("mch4o", "spma");
+    try backend.put("4", "spam");
+    try backend.append("4", "spam");
+
+    {
+        const value = try backend.get(std.testing.allocator, "4");
+        defer std.testing.allocator.free(value.?);
+        try std.testing.expectEqualStrings("spam", value.?);
+    }
+
+    {
+        const value = try backend.popFirst(std.testing.allocator, "mch4o");
+        defer std.testing.allocator.free(value.?);
+        try std.testing.expectEqualStrings("spma", value.?);
+    }
 }
