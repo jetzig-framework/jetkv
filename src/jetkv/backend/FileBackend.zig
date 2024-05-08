@@ -1845,7 +1845,7 @@ test "bug: replace first string in linked list with insufficient space for overw
     try std.testing.expectEqualStrings("spam", value.?);
 }
 
-test "bug: overwrite linked string with array" {
+test "bug: overwrite linked string (from string) with array" {
     var backend = try FileBackend.init(.{
         .path = "/tmp/jetkv.db",
         .address_space_size = bufSize(u32) * 1,
