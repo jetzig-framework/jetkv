@@ -930,6 +930,7 @@ fn removeLinkedString(self: FileBackend, item: Item, key: []const u8) !void {
         previous_item = linked_item;
     }
 }
+
 fn updateLinkedString(
     self: FileBackend,
     previous_address: AddressInfo,
@@ -1072,6 +1073,7 @@ fn createFile(path: []const u8, options: std.fs.File.CreateFlags) !std.fs.File {
         return err;
     };
 }
+
 fn serialize(T: type, value: T, buf: *[bufSize(T)]u8) void {
     switch (T) {
         u8, u16, u32 => std.mem.writeInt(T, buf, value, endian),
