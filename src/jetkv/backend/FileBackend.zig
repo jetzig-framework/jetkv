@@ -270,6 +270,14 @@ fn popLinked(
                 const last_item = try self.readItem(last_item_address, key_buf);
                 const value = try last_item.value(allocator);
                 try self.shrinkArray(linked_item.address, last_item.address);
+
+                if (linked_item.address.location == end_location) {
+                    try self.updateAddress(
+                        previous_item.address.location,
+                        .{ .linked_next_location = .none },
+                    );
+                }
+
                 try self.decRefCount();
                 try self.maybeTruncate(last_item.address);
                 return value;
@@ -412,7 +420,7 @@ fn shrinkArray(self: FileBackend, first_item_address: AddressInfo, last_item_add
         );
     } else {
         // We reached the first item
-        try self.updateAddress(first_item_address.location, .{ .array_end_location = .{ .value = 0 } });
+        try self.updateAddress(first_item_address.location, .{ .array_end_location = .none });
     }
 }
 
@@ -2032,4 +2040,26 @@ test "bug: popFirst with linked value (preserve link)" {
         defer std.testing.allocator.free(value.?);
         try std.testing.expectEqualStrings("spam", value.?);
     }
+}
+
+test "bug: infinite loop on linked array pop" {
+    var backend = try FileBackend.init(.{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = bufSize(u32) * 3,
+        .truncate = true,
+    });
+    defer backend.deinit();
+
+    try backend.put("8", "spam");
+    try backend.append("r", "eggs");
+    {
+        const value = try backend.pop(std.testing.allocator, "r");
+        defer std.testing.allocator.free(value.?);
+        try std.testing.expectEqualStrings(
+            "eggs",
+            value.?,
+        );
+    }
+    try backend.append("8", "spamandeggs");
+    try std.testing.expect(try backend.pop(std.testing.allocator, "2e") == null);
 }
