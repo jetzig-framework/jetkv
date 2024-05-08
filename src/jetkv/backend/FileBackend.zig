@@ -305,7 +305,10 @@ fn popFirstLinked(
                     .{ .array_end_location = .{ .value = linked_item.address.array_end_location } },
                 );
             } else {
-                try self.updateAddress(linked_item.address.location, .{ .array_next_location = .none });
+                try self.updateAddress(
+                    linked_item.address.location,
+                    .{ .array_end_location = .none, .array_next_location = .none },
+                );
             }
             const value = try linked_item.value(allocator);
             try self.decRefCount();
@@ -1973,7 +1976,30 @@ test "bug: append to empty indexed array" {
     {
         const value = try backend.get(std.testing.allocator, "2");
         defer std.testing.allocator.free(value.?);
+        try std.testing.expectEqualStrings("eggs", value.?);
+    }
+}
 
+test "bug: append to empty linked array after emptying" {
+    var backend = try FileBackend.init(.{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = bufSize(u32) * 1024,
+        .truncate = true,
+    });
+    defer backend.deinit();
+
+    try backend.put("BCMB92d", "spam");
+    try backend.append("3", "spamspam");
+    {
+        const value = try backend.popFirst(std.testing.allocator, "3");
+        defer std.testing.allocator.free(value.?);
+        try std.testing.expectEqualStrings("spamspam", value.?);
+    }
+    try backend.append("3", "eggs");
+
+    {
+        const value = try backend.popFirst(std.testing.allocator, "3");
+        defer std.testing.allocator.free(value.?);
         try std.testing.expectEqualStrings("eggs", value.?);
     }
 }
