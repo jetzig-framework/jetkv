@@ -274,7 +274,7 @@ fn popLinked(
                 if (linked_item.address.location == end_location) {
                     try self.updateAddress(
                         previous_item.address.location,
-                        .{ .linked_next_location = .none },
+                        .{ .linked_next_location = .{ .value = linked_item.address.linked_next_location } },
                     );
                 }
 
