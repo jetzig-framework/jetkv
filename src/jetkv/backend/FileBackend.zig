@@ -302,7 +302,10 @@ fn popFirstLinked(
                 );
                 try self.updateAddress(
                     next_location,
-                    .{ .array_end_location = .{ .value = linked_item.address.array_end_location } },
+                    .{
+                        .array_end_location = .{ .value = linked_item.address.array_end_location },
+                        .linked_next_location = .{ .value = linked_item.address.linked_next_location },
+                    },
                 );
             } else {
                 try self.updateAddress(
@@ -2001,5 +2004,32 @@ test "bug: append to empty linked array after emptying" {
         const value = try backend.popFirst(std.testing.allocator, "3");
         defer std.testing.allocator.free(value.?);
         try std.testing.expectEqualStrings("eggs", value.?);
+    }
+}
+
+test "bug: popFirst with linked value (preserve link)" {
+    var backend = try FileBackend.init(.{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = bufSize(u32) * 3,
+        .truncate = true,
+    });
+    defer backend.deinit();
+
+    try backend.append("rw", "spam");
+    try backend.put("m", "spam");
+    try backend.put("0", "spam");
+    try backend.append("m", "eggs");
+    try backend.append("m", "boom");
+
+    {
+        const value = try backend.popFirst(std.testing.allocator, "m");
+        defer std.testing.allocator.free(value.?);
+        try std.testing.expectEqualStrings("eggs", value.?);
+    }
+
+    {
+        const value = try backend.get(std.testing.allocator, "0");
+        defer std.testing.allocator.free(value.?);
+        try std.testing.expectEqualStrings("spam", value.?);
     }
 }
