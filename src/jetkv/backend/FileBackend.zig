@@ -329,10 +329,15 @@ fn popFirstIndexed(
         // Maintain possible next linked item
         try self.updateAddress(
             array_next_location,
-            .{ .array_end_location = .{ .value = item.address.array_end_location }, .linked_next_location = .{ .value = item.address.linked_next_location } },
+            .{
+                .array_end_location = .{ .value = item.address.array_end_location },
+                .linked_next_location = .{ .value = item.address.linked_next_location },
+            },
         );
     } else if (item.address.linked_next_location == null) {
         try self.updateLocation(index, null);
+    } else {
+        try self.updateAddress(item.address.location, .{ .array_end_location = .none });
     }
     const value = try item.value(allocator);
     try self.decRefCount();
@@ -1942,4 +1947,31 @@ test "bug: overwrite linked string with array" {
     defer std.testing.allocator.free(value.?);
 
     try std.testing.expectEqualStrings("spam", value.?);
+}
+
+test "bug: append to empty indexed array" {
+    var backend = try FileBackend.init(.{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = bufSize(u32) * 1024,
+        .truncate = true,
+    });
+    defer backend.deinit();
+
+    try backend.append("2", "spamspam");
+    try backend.append("_P", "spam");
+
+    {
+        const value = try backend.popFirst(std.testing.allocator, "2");
+        defer std.testing.allocator.free(value.?);
+        try std.testing.expectEqualStrings("spamspam", value.?);
+    }
+
+    try backend.append("2", "eggs");
+
+    {
+        const value = try backend.get(std.testing.allocator, "2");
+        defer std.testing.allocator.free(value.?);
+
+        try std.testing.expectEqualStrings("eggs", value.?);
+    }
 }
