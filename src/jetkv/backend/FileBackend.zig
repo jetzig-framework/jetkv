@@ -100,7 +100,7 @@ pub fn deinit(self: *FileBackend) void {
 
 /// Fetch a string from the file-based backend.
 pub fn get(self: *FileBackend, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
-    if (key.len > max_key_len) return error.JetKVKeyTooLong;
+    try validateKey(key);
 
     self.mutex.lock();
     defer self.mutex.unlock();
@@ -110,7 +110,7 @@ pub fn get(self: *FileBackend, allocator: std.mem.Allocator, key: []const u8) !?
 
 /// Add a String to the file-based backend.
 pub fn put(self: *FileBackend, key: []const u8, value: []const u8) !void {
-    if (key.len > max_key_len) return error.JetKVKeyTooLong;
+    try validateKey(key);
 
     self.mutex.lock();
     defer self.mutex.unlock();
@@ -121,7 +121,7 @@ pub fn put(self: *FileBackend, key: []const u8, value: []const u8) !void {
 
 /// Remove a String from the file-based backend.
 pub fn remove(self: *FileBackend, key: []const u8) !void {
-    if (key.len > max_key_len) return error.JetKVKeyTooLong;
+    try validateKey(key);
 
     self.mutex.lock();
     defer self.mutex.unlock();
@@ -132,7 +132,7 @@ pub fn remove(self: *FileBackend, key: []const u8) !void {
 
 /// Remove a String from the file-based backend and return it if found.
 pub fn fetchRemove(self: *FileBackend, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
-    if (key.len > max_key_len) return error.JetKVKeyTooLong;
+    try validateKey(key);
 
     self.mutex.lock();
     defer self.mutex.unlock();
@@ -148,6 +148,8 @@ pub fn fetchRemove(self: *FileBackend, allocator: std.mem.Allocator, key: []cons
 pub fn prepend(self: *FileBackend, key: []const u8, value: []const u8) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
+
+    try validateKey(key);
 
     const index = try self.locate(key);
     if (try self.readIndexAddress(index)) |address| {
@@ -176,6 +178,8 @@ pub fn prepend(self: *FileBackend, key: []const u8, value: []const u8) !void {
 
 /// Pop a String from the end of an Array in the file-based backend.
 pub fn pop(self: *FileBackend, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
+    try validateKey(key);
+
     self.mutex.lock();
     defer self.mutex.unlock();
 
@@ -200,6 +204,8 @@ pub fn pop(self: *FileBackend, allocator: std.mem.Allocator, key: []const u8) !?
 
 /// Pop a String from the start of an Array in the file-based backend.
 pub fn popFirst(self: *FileBackend, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
+    try validateKey(key);
+
     self.mutex.lock();
     defer self.mutex.unlock();
 
@@ -257,7 +263,7 @@ fn popLinked(
         const is_equal_key = std.mem.eql(u8, linked_item.key, key);
         if (is_equal_key and linked_item.address.type != .array) return null;
 
-        if (is_equal_key) {
+        if (is_equal_key and linked_item.address.type == .array) {
             const end_location = linked_item.address.array_end_location orelse return null;
 
             if (try self.readAddress(end_location)) |last_item_address| {
@@ -267,9 +273,9 @@ fn popLinked(
                 try self.decRefCount();
                 try self.maybeTruncate(last_item.address);
                 return value;
-            } else {
+            } else if (is_equal_key and linked_item.address.type == .string) {
                 return null;
-            }
+            } else if (is_equal_key) unreachable;
         }
         previous_item = linked_item;
     }
@@ -294,6 +300,8 @@ fn popFirstLinked(self: FileBackend, allocator: std.mem.Allocator, item: Item, k
             const value = try linked_item.value(allocator);
             try self.decRefCount();
             return value;
+        } else if (is_equal_key and linked_item.address.type == .string) {
+            return null;
         } else if (is_equal_key) unreachable;
         previous_item = linked_item;
     }
@@ -543,7 +551,11 @@ pub fn append(self: *FileBackend, key: []const u8, value: []const u8) !void {
             while (try it.next()) |linked_item| {
                 const is_equal_key = std.mem.eql(u8, linked_item.key, key);
                 if (is_equal_key and linked_item.address.type == .array) {
-                    try self.appendItemToExistingArray(linked_item.address, key, value);
+                    if (linked_item.address.array_end_location == null) {
+                        try self.createArray(previous_item.address.location, key, value, .{ .linked = true });
+                    } else {
+                        try self.appendItemToExistingArray(linked_item.address, key, value);
+                    }
                     try self.incRefCount();
                     return;
                 } else if (is_equal_key and linked_item.address.type == .string) {
@@ -1071,6 +1083,10 @@ fn bufSize(T: type) u32 {
 
 fn isOverwrite(address: AddressInfo, key: []const u8, value: []const u8) bool {
     return key.len <= address.max_key_len and value.len <= address.max_value_len;
+}
+
+fn validateKey(key: []const u8) !void {
+    if (key.len > max_key_len) return error.JetKVKeyTooLong;
 }
 
 test "basic put/get" {
@@ -1816,4 +1832,35 @@ test "bug: overwrite linked string with array" {
         defer std.testing.allocator.free(value.?);
         try std.testing.expectEqualStrings("spma", value.?);
     }
+}
+
+test "bug: popFirst linked string" {
+    var backend = try FileBackend.init(.{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = bufSize(u32) * 1024,
+        .truncate = true,
+    });
+    defer backend.deinit();
+
+    try backend.append("NfhsbHl", "spam");
+    try backend.put("_", "spam");
+    try std.testing.expect(try backend.popFirst(std.testing.allocator, "_") == null);
+}
+
+test "bug: append to empty linked array" {
+    var backend = try FileBackend.init(.{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = bufSize(u32) * 23,
+        .truncate = true,
+    });
+    defer backend.deinit();
+
+    try backend.put("BZWOy", "spam");
+    try backend.append("", "spam");
+    try backend.put("j6", "spam");
+
+    const value = try backend.pop(std.testing.allocator, "");
+    defer std.testing.allocator.free(value.?);
+
+    try std.testing.expectEqualStrings("spam", value.?);
 }
