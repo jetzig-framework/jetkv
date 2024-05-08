@@ -164,13 +164,13 @@ pub fn prepend(self: *FileBackend, key: []const u8, value: []const u8) !void {
             try self.incRefCount();
         } else if (is_equal) {
             // Overwrite string/re-use empty array
-            try self.createArray(index, key, value, .{ .linked = false });
+            try self.createArray(index, address, key, value, .{ .linked = false });
         } else {
             // Collision
             try self.prependLinked(item, key, value, &key_buf);
         }
     } else {
-        try self.createArray(index, key, value, .{ .linked = false });
+        try self.createArray(index, null, key, value, .{ .linked = false });
         try self.incRefCount();
     }
     try self.sync();
@@ -282,7 +282,13 @@ fn popLinked(
     return null;
 }
 
-fn popFirstLinked(self: FileBackend, allocator: std.mem.Allocator, item: Item, key: []const u8, key_buf: *[max_key_len]u8) !?[]const u8 {
+fn popFirstLinked(
+    self: FileBackend,
+    allocator: std.mem.Allocator,
+    item: Item,
+    key: []const u8,
+    key_buf: *[max_key_len]u8,
+) !?[]const u8 {
     var it = self.linkedListIterator(item.address, key_buf);
     var previous_item = item;
 
@@ -292,10 +298,14 @@ fn popFirstLinked(self: FileBackend, allocator: std.mem.Allocator, item: Item, k
             if (linked_item.address.array_next_location) |next_location| {
                 try self.updateAddress(
                     previous_item.address.location,
-                    .{ .array_next_location = .{ .value = next_location } },
+                    .{ .linked_next_location = .{ .value = next_location } },
+                );
+                try self.updateAddress(
+                    next_location,
+                    .{ .array_end_location = .{ .value = linked_item.address.array_end_location } },
                 );
             } else {
-                try self.updateAddress(previous_item.address.location, .{ .array_next_location = .none });
+                try self.updateAddress(linked_item.address.location, .{ .array_next_location = .none });
             }
             const value = try linked_item.value(allocator);
             try self.decRefCount();
@@ -321,7 +331,7 @@ fn popFirstIndexed(
             array_next_location,
             .{ .array_end_location = .{ .value = item.address.array_end_location }, .linked_next_location = .{ .value = item.address.linked_next_location } },
         );
-    } else {
+    } else if (item.address.linked_next_location == null) {
         try self.updateLocation(index, null);
     }
     const value = try item.value(allocator);
@@ -353,11 +363,12 @@ fn prependLinked(
             );
             try self.incRefCount();
             return;
-        } else if (is_equal_key and item.address.type == .string) {
+        } else if (is_equal_key and linked_item.address.type == .string) {
             // Overwrite string value
             try self.updateAddress(linked_item.address.location, .{ .type = .array });
             try self.createArray(
                 linked_item.address.location,
+                linked_item.address,
                 key,
                 value,
                 .{ .linked = false },
@@ -370,7 +381,7 @@ fn prependLinked(
 
     // No matches in linked list - create new array at EOF and link to final item in
     // linked list
-    try self.createArray(previous_item.address.location, key, value, .{ .linked = true });
+    try self.createArray(previous_item.address.location, null, key, value, .{ .linked = true });
     try self.incRefCount();
 }
 
@@ -541,7 +552,7 @@ pub fn append(self: *FileBackend, key: []const u8, value: []const u8) !void {
             return;
         } else if (is_equal) {
             // Overwrite string/re-use empty array
-            try self.createArray(index, key, value, .{ .linked = false });
+            try self.createArray(index, address, key, value, .{ .linked = false });
             return;
         } else {
             // Collision
@@ -552,7 +563,13 @@ pub fn append(self: *FileBackend, key: []const u8, value: []const u8) !void {
                 const is_equal_key = std.mem.eql(u8, linked_item.key, key);
                 if (is_equal_key and linked_item.address.type == .array) {
                     if (linked_item.address.array_end_location == null) {
-                        try self.createArray(previous_item.address.location, key, value, .{ .linked = true });
+                        try self.createArray(
+                            previous_item.address.location,
+                            previous_item.address,
+                            key,
+                            value,
+                            .{ .linked = true },
+                        );
                     } else {
                         try self.appendItemToExistingArray(linked_item.address, key, value);
                     }
@@ -561,7 +578,13 @@ pub fn append(self: *FileBackend, key: []const u8, value: []const u8) !void {
                 } else if (is_equal_key and linked_item.address.type == .string) {
                     // Overwrite string value
                     try self.updateAddress(previous_item.address.location, .{ .type = .array });
-                    try self.createArray(previous_item.address.location, key, value, .{ .linked = true });
+                    try self.createArray(
+                        previous_item.address.location,
+                        previous_item.address,
+                        key,
+                        value,
+                        .{ .linked = true },
+                    );
                     return;
                 } else if (is_equal_key) unreachable;
 
@@ -570,11 +593,11 @@ pub fn append(self: *FileBackend, key: []const u8, value: []const u8) !void {
 
             // No matches in linked list - create new array at EOF and link to final item in
             // linked list
-            try self.createArray(previous_item.address.location, key, value, .{ .linked = true });
+            try self.createArray(previous_item.address.location, null, key, value, .{ .linked = true });
             try self.incRefCount();
         }
     } else {
-        try self.createArray(index, key, value, .{ .linked = false });
+        try self.createArray(index, null, key, value, .{ .linked = false });
         try self.incRefCount();
     }
 }
@@ -583,11 +606,24 @@ const CreateArrayOptions = struct {
     linked: bool,
 };
 
-fn createArray(self: FileBackend, index: u32, key: []const u8, value: []const u8, options: CreateArrayOptions) !void {
+fn createArray(
+    self: FileBackend,
+    index: u32,
+    maybe_address: ?AddressInfo,
+    key: []const u8,
+    value: []const u8,
+    options: CreateArrayOptions,
+) !void {
     var address_buf: [address_len]u8 = undefined;
 
     const end_pos = try self.getEndPos();
-    const address = makeAddress(.array, .{ .location = end_pos, .key = key, .value = value });
+    const linked_next_location = if (maybe_address) |address| address.linked_next_location else null;
+    const address = makeAddress(.array, .{
+        .location = end_pos,
+        .linked_next_location = linked_next_location,
+        .key = key,
+        .value = value,
+    });
     serialize(AddressInfo, address, &address_buf);
 
     try self.updateLocation(index + if (options.linked) linked_next_location_offset else 0, end_pos);
@@ -1860,6 +1896,49 @@ test "bug: append to empty linked array" {
     try backend.put("j6", "spam");
 
     const value = try backend.pop(std.testing.allocator, "");
+    defer std.testing.allocator.free(value.?);
+
+    try std.testing.expectEqualStrings("spam", value.?);
+}
+
+test "bug: popFirst from array linked from empty array" {
+    var backend = try FileBackend.init(.{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = bufSize(u32) * 1024,
+        .truncate = true,
+    });
+    defer backend.deinit();
+
+    try backend.put("KrSA", "spam");
+    try backend.append("Q", "spam");
+    try backend.append("Q", "eggs");
+
+    {
+        const value = try backend.popFirst(std.testing.allocator, "Q");
+        defer std.testing.allocator.free(value.?);
+        try std.testing.expectEqualStrings("spam", value.?);
+    }
+
+    {
+        const value = try backend.popFirst(std.testing.allocator, "Q");
+        defer std.testing.allocator.free(value.?);
+        try std.testing.expectEqualStrings("eggs", value.?);
+    }
+}
+
+test "bug: overwrite linked string with array" {
+    var backend = try FileBackend.init(.{
+        .path = "/tmp/jetkv.db",
+        .address_space_size = bufSize(u32) * 1024,
+        .truncate = true,
+    });
+    defer backend.deinit();
+
+    try backend.put("V", "spam");
+    try backend.put("n", "spam");
+    try backend.append("V", "spam");
+
+    const value = try backend.get(std.testing.allocator, "n");
     defer std.testing.allocator.free(value.?);
 
     try std.testing.expectEqualStrings("spam", value.?);
