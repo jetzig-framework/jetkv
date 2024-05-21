@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const lib = b.addStaticLibrary(.{
         .name = "jetkv",
-        .root_source_file = .{ .path = "src/root.zig" },
+        .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -13,12 +13,12 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(lib);
 
     const lib_unit_tests = b.addTest(.{
-        .root_source_file = .{ .path = "src/tests.zig" },
+        .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    _ = b.addModule("jetkv", .{ .root_source_file = .{ .path = "src/jetkv.zig" } });
+    _ = b.addModule("jetkv", .{ .root_source_file = b.path("src/jetkv.zig") });
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
