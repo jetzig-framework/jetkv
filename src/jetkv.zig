@@ -1,5 +1,7 @@
 const std = @import("std");
 
+pub const jetkv = @This();
+
 /// Key-value store.
 pub const JetKV = @import("jetkv/JetKV.zig");
 
