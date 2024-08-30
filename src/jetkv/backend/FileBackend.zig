@@ -1128,8 +1128,8 @@ fn deserialize(T: type, buf: *[bufSize(T)]u8) T {
 
 fn bufSize(T: type) u32 {
     return switch (T) {
-        u8, u16, u32 => @divExact(@typeInfo(T).Int.bits, 8),
-        ?u32 => @divExact(@typeInfo(u32).Int.bits, 8),
+        u8, u16, u32 => @divExact(@typeInfo(T).int.bits, 8),
+        ?u32 => @divExact(@typeInfo(u32).int.bits, 8),
         AddressInfo => address_len,
         Header => header_len,
         ValueType => bufSize(u8),
