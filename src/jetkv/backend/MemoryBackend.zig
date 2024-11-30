@@ -1,23 +1,28 @@
 const std = @import("std");
 
 const jetkv = @import("../../jetkv.zig");
+const Options = @import("../JetKV.zig").Options;
 
 allocator: std.mem.Allocator,
-options: jetkv.JetKV.Options,
-string_storage: std.StringHashMap([]const u8),
+options: Options,
+string_storage: std.StringHashMap(ExpirableString),
 array_storage: std.StringHashMap(*Array),
 mutex: std.Thread.Mutex,
 
 const Self = @This();
 
 const Array = std.DoublyLinkedList([]const u8);
+const ExpirableString = struct {
+    string: []const u8,
+    expiry: ?i64,
+};
 
 /// Initialize a new memory-based storage backend.
-pub fn init(allocator: std.mem.Allocator, options: jetkv.JetKV.Options) Self {
+pub fn init(allocator: std.mem.Allocator, options: Options) Self {
     return .{
         .allocator = allocator,
         .options = options,
-        .string_storage = std.StringHashMap([]const u8).init(allocator),
+        .string_storage = std.StringHashMap(ExpirableString).init(allocator),
         .array_storage = std.StringHashMap(*Array).init(allocator),
         .mutex = std.Thread.Mutex{},
     };
@@ -27,7 +32,7 @@ pub fn deinit(self: *Self) void {
     var string_it = self.string_storage.iterator();
     while (string_it.next()) |item| {
         self.allocator.free(item.key_ptr.*);
-        self.allocator.free(item.value_ptr.*);
+        self.allocator.free(item.value_ptr.*.string);
     }
     self.string_storage.deinit();
 
@@ -46,27 +51,49 @@ pub fn deinit(self: *Self) void {
 /// Fetch a String from the memory-based backend.
 pub fn get(self: *Self, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
     self.mutex.lock();
-    defer self.mutex.unlock();
 
-    return if (self.string_storage.get(key)) |value|
-        try allocator.dupe(u8, value)
-    else
-        null;
+    return if (self.string_storage.get(key)) |entry| blk: {
+        if (entry.expiry) |expiry| {
+            if (expiry < std.time.milliTimestamp()) {
+                self.mutex.unlock(); // `remove` regains the lock
+                try self.remove(key);
+                break :blk null;
+            }
+        }
+
+        errdefer self.mutex.unlock();
+        const value = try allocator.dupe(u8, entry.string);
+        self.mutex.unlock();
+        break :blk value;
+    } else blk: {
+        self.mutex.unlock();
+        break :blk null;
+    };
 }
 
 /// Add a String to the memory-based backend.
 pub fn put(self: *Self, key: []const u8, value: []const u8) !void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    try self.putMaybeExpire(key, value, null);
+}
+
+/// Store a String in the key-value store with an expiration time in seconds.
+pub fn putExpire(self: *Self, key: []const u8, value: []const u8, expiration: i32) !void {
+    try self.putMaybeExpire(key, value, std.time.milliTimestamp() + (expiration * std.time.ms_per_s));
+}
+
+fn putMaybeExpire(self: *Self, key: []const u8, value: []const u8, expiry: ?i64) !void {
+    const duped_key = try self.allocator.dupe(u8, key);
+    const duped_value = try self.allocator.dupe(u8, value);
 
     if (self.string_storage.fetchRemove(key)) |entry| {
         self.allocator.free(entry.key);
-        self.allocator.free(entry.value);
+        self.allocator.free(entry.value.string);
     }
-    try self.string_storage.put(
-        try self.allocator.dupe(u8, key),
-        try self.allocator.dupe(u8, value),
-    );
+
+    self.mutex.lock();
+    defer self.mutex.unlock();
+
+    try self.string_storage.put(duped_key, .{ .string = duped_value, .expiry = expiry });
 }
 
 /// Remove a String from the memory-based backend, return it if found.
@@ -76,7 +103,7 @@ pub fn fetchRemove(self: *Self, allocator: std.mem.Allocator, key: []const u8) !
 
     return if (self.string_storage.fetchRemove(key)) |entry| blk: {
         allocator.free(entry.key);
-        break :blk entry.value;
+        break :blk entry.value.string;
     } else null;
 }
 
@@ -87,7 +114,7 @@ pub fn remove(self: *Self, key: []const u8) !void {
 
     if (self.string_storage.fetchRemove(key)) |entry| {
         self.allocator.free(entry.key);
-        self.allocator.free(entry.value);
+        self.allocator.free(entry.value.string);
     }
 }
 

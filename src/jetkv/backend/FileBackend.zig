@@ -2,7 +2,14 @@ const std = @import("std");
 
 const jetkv = @import("../../jetkv.zig");
 
-options: jetkv.JetKV.FileBackendOptions,
+/// Options specific to the File-based backend.
+pub const Options = struct {
+    path: ?[]const u8 = null,
+    address_space_size: u32 = FileBackend.addressSpace(4096),
+    truncate: bool = false,
+};
+
+options: Options,
 mutex: std.Thread.Mutex,
 path: []const u8,
 file: std.fs.File,
@@ -71,7 +78,7 @@ pub fn addressSpace(size: u32) u32 {
 }
 
 /// Initialize a new file-based storage backend.
-pub fn init(options: jetkv.JetKV.FileBackendOptions) !FileBackend {
+pub fn init(options: Options) !FileBackend {
     if (try std.math.mod(u32, options.address_space_size, bufSize(u32)) != 0) {
         return error.JetKVInvalidAddressSpaceSize;
     }

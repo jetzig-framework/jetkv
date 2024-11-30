@@ -14,6 +14,18 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(lib);
 
+    const exe = b.addExecutable(.{
+        .name = "jetkv",
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    b.installArtifact(exe);
+    const run = b.addRunArtifact(exe);
+    const run_step = b.step("run", "Run");
+    run_step.dependOn(&run.step);
+
     const lib_unit_tests = b.addTest(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
