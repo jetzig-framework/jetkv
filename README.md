@@ -1,6 +1,6 @@
 # JetKV
 
-_JetKV_ is a key-value store written in _Zig_ intended for use in development web servers.
+_JetKV_ is a key-value store written in _Zig_ intended for use in development and production web servers. Basic in-memory and on-disk backends are provided for local development and a [Valkey](https://valkey.io/) backend is provided for production. All backends are exposed by a unified interface.
 
 _JetKV_ can be used for:
 
@@ -17,39 +17,55 @@ _JetKV_ is used by the [Jetzig Web Framework](https://jetzig.dev/) to provide a 
 * :white_check_mark: Array value storage.
 * :white_check_mark: Array pop/queue implementation.
 * :white_check_mark: On-disk storage.
-* :x: Key expiry.
+* :white_check_mark: Valkey backend.
+* :white_check_mark: Key expiry (Valkey only at the moment).
 * :x: Shared memory.
 
 ## Usage
 
-### Memory Allocator
+### Valkey Backend
+
+Recommended for production.
 
 ```zig
-var kv = try JetKV.init(allocator, .{ .backend = .memory });
+var kv = try JetKV(.{
+    .backend = .valkey,
+    .valkey_backend_options = .{
+        .pool_size = 8,
+        .buffer_size = 8192,
+    },
+}).init(allocator);
 ```
 
-### File Allocator
+### Memory Backend
+
+Recommended for local development.
+
+```zig
+var kv = try JetKV(.{ .backend = .memory }).init(allocator);
+```
+
+### File Backend
+
+Recommended for local development where persistent storage is required.
 
 When using the file allocator, `JetKV.init` receives an allocator in order to provide a consistent API but does not perform any allocations. It is therefore possible to pass `undefined` instead of an allocator when using the file allocator.
 
 The file passed as the `path` field is locked on startup.
 
 ```zig
-var kv = try JetKV.init(
-    allocator,
-    .{
-        .backend = .file,
-        .file_backend_options = .{
-            // Path to storage file (JetKV stores all data in a single, platform-agnostic file)
-            .path = "/path/to/jetkv.db",
-            // Set to `true` to clear the store on each launch.
-            .truncate = false,
-            // Set the size of the on-disk hash table (each address is currently 4 bytes)
-            // Use `jetkv.addressSpaceSize` to guarantee a valid size if address size changes in future
-            .address_space_size = jetkv.addressSpaceSize(4096),
-        },
+var kv = try JetKV(.{
+    .backend = .file,
+    .file_backend_options = .{
+        // Path to storage file (JetKV stores all data in a single, platform-agnostic file)
+        .path = "/path/to/jetkv.db",
+        // Set to `true` to clear the store on each launch.
+        .truncate = false,
+        // Set the size of the on-disk hash table (each address is currently 4 bytes)
+        // Use `jetkv.addressSpaceSize` to guarantee a valid size if address size changes in future
+        .address_space_size = jetkv.addressSpaceSize(4096),
     },
-);
+}).init(allocator);
 ```
 
 ### Key-Value Operations
@@ -93,7 +109,31 @@ if (kv.popFirst(allocator, "example_array")) |value| {
 }
 ```
 
+## Testing
+
+Launch _Valkey_:
+
+```console
+docker compose up
+```
+
+Run tests:
+
+```console
+zig build test
+```
+
 ## Implementation
+
+### Valkey
+
+Native _Zig_ adapter for [Valkey](https://valkey.io/) implementing [RESP 3](https://www.mankier.com/7/valkey-protocol).
+
+Benchmark:
+
+```console
+zig build -Doptimize=ReleaseFast run
+```
 
 ### Memory
 

@@ -1,9 +1,10 @@
 const std = @import("std");
 
 const jetkv = @import("../../jetkv.zig");
+const Options = @import("../JetKV.zig").Options;
 
 allocator: std.mem.Allocator,
-options: jetkv.JetKV.Options,
+options: Options,
 string_storage: std.StringHashMap([]const u8),
 array_storage: std.StringHashMap(*Array),
 mutex: std.Thread.Mutex,
@@ -13,7 +14,7 @@ const Self = @This();
 const Array = std.DoublyLinkedList([]const u8);
 
 /// Initialize a new memory-based storage backend.
-pub fn init(allocator: std.mem.Allocator, options: jetkv.JetKV.Options) Self {
+pub fn init(allocator: std.mem.Allocator, options: Options) Self {
     return .{
         .allocator = allocator,
         .options = options,
