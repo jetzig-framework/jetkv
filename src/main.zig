@@ -13,6 +13,7 @@ const KV = jetkv.JetKV(.{
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
+
     var kv = try KV.init(allocator);
     try kv.put("foo", "bar");
     const start: usize = @intCast(std.time.nanoTimestamp());

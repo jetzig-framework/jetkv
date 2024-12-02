@@ -70,7 +70,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                         self.port,
                     );
                     self.state = .connected;
-                    const response = try self.execute(.hello, .{"3"});
+                    const response = try self.execute(.hello, null, .{"3"});
                     std.debug.assert(response != .err);
                 }
 
@@ -81,11 +81,14 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 pub fn execute(
                     self: Connection,
                     comptime command_name: Command.Name,
+                    maybe_allocator: ?std.mem.Allocator,
                     args: anytype,
                 ) !Response {
                     std.debug.assert(self.state == .connected);
-
-                    var stack_fallback = std.heap.stackFallback(options.buffer_size, self.allocator);
+                    var stack_fallback = std.heap.stackFallback(
+                        options.buffer_size,
+                        maybe_allocator orelse self.allocator,
+                    );
                     const allocator = stack_fallback.get();
                     var buf = std.ArrayList(u8).init(allocator);
                     defer buf.deinit();
@@ -97,18 +100,6 @@ pub fn ValkeyBackend(comptime options: Options) type {
 
                     const reader = self.stream.reader();
                     return Response.parse(allocator, reader);
-                }
-
-                fn readPayload(self: Connection, allocator: std.mem.Allocator) ![]const u8 {
-                    // const stream_reader = self.stream.reader();
-                    var input_buf = std.ArrayList(u8).init(allocator);
-                    while (true) {
-                        var buf: [options.buffer_size]u8 = undefined;
-                        const bytes_read = try self.stream.readAtLeast(buf[0..], 1);
-                        try input_buf.appendSlice(buf[0..bytes_read]);
-                        if (bytes_read == 0) break;
-                    }
-                    return try input_buf.toOwnedSlice();
                 }
             };
 
@@ -186,7 +177,6 @@ pub fn ValkeyBackend(comptime options: Options) type {
 
             const String = struct {
                 value: []const u8,
-                buf: [options.buffer_size]u8 = undefined,
 
                 fn init(allocator: std.mem.Allocator, data: []const u8) !String {
                     var it = std.mem.tokenizeSequence(u8, data, CRLF);
@@ -196,14 +186,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                     const len = try std.fmt.parseInt(u64, first_token.?, 0);
                     const rest = it.rest();
                     std.debug.assert(rest.len == len + CRLF.len);
-                    if (data.len > options.buffer_size) {
-                        const duped = try allocator.dupe(u8, rest[0..len]);
-                        return .{ .value = duped };
-                    } else {
-                        var buf: [options.buffer_size]u8 = undefined;
-                        @memcpy(buf[0..len], rest[0..len]);
-                        return .{ .buf = buf, .value = buf[0..len] };
-                    }
+                    return .{ .value = try allocator.dupe(u8, rest[0..len]) };
                 }
             };
 
@@ -278,7 +261,31 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 var array = std.ArrayList(u8).init(allocator);
                 defer array.deinit();
                 const writer = array.writer();
-                try readParts(writer, parts_count, reader);
+
+                if (code == '$') {
+                    const bytes_to_read = try readInt(reader);
+                    try writer.print("{}\r\n", .{bytes_to_read});
+                    var string_buf: [options.buffer_size]u8 = undefined;
+                    var total_bytes_read: usize = 0;
+                    while (true) {
+                        const end = std.mem.min(
+                            usize,
+                            &.{ string_buf.len, bytes_to_read - total_bytes_read },
+                        );
+                        const bytes_read = try reader.read(
+                            string_buf[0..end],
+                        );
+                        total_bytes_read += bytes_read;
+                        try array.appendSlice(string_buf[0..bytes_read]);
+                        if (total_bytes_read == bytes_to_read) {
+                            try readUntilTerminator(writer, reader);
+                            break;
+                        }
+                    }
+                } else {
+                    try readParts(writer, parts_count, reader);
+                }
+
                 const payload = array.items;
 
                 return switch (code) {
@@ -307,11 +314,21 @@ pub fn ValkeyBackend(comptime options: Options) type {
 
             fn readUntilTerminator(writer: anytype, reader: anytype) !void {
                 var cr = false;
+                var buf: [options.buffer_size]u8 = undefined;
+                var cursor: usize = 0;
                 while (true) {
                     const byte = try reader.readByte();
                     if (byte == '\r') cr = true;
-                    try writer.writeByte(byte);
-                    if (cr and byte == '\n') break;
+                    buf[cursor] = byte;
+                    cursor += 1;
+                    if (cursor == buf.len) {
+                        try writer.writeAll(buf[0..]);
+                        cursor = 0;
+                    }
+                    if (cr and byte == '\n') {
+                        if (cursor != buf.len) try writer.writeAll(buf[0..cursor]);
+                        break;
+                    }
                 }
             }
 
@@ -379,12 +396,13 @@ pub fn ValkeyBackend(comptime options: Options) type {
         pub fn execute(
             self: Self,
             comptime command_name: Command.Name,
+            allocator: ?std.mem.Allocator,
             args: anytype,
         ) !Response {
             const connection = try self.pool.acquire();
             if (options.connect == .lazy and connection.state == .initial) try connection.connect();
             defer self.pool.release(connection);
-            return connection.execute(command_name, args) catch |err|
+            return connection.execute(command_name, allocator, args) catch |err|
                 switch (err) {
                 error.EndOfStream, error.BrokenPipe => blk: {
                     try connection.connect();
@@ -395,8 +413,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
         }
 
         pub fn get(self: Self, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
-            _ = allocator;
-            const response = try self.execute(.get, .{key});
+            const response = try self.execute(.get, allocator, .{key});
             std.debug.assert(response == .null or response == .string);
             return switch (response) {
                 .string => |string| string.value,
@@ -406,14 +423,14 @@ pub fn ValkeyBackend(comptime options: Options) type {
         }
 
         pub fn put(self: Self, key: []const u8, value: []const u8) !void {
-            const response = try self.execute(.set, .{ key, value });
+            const response = try self.execute(.set, null, .{ key, value });
             std.debug.assert(response == .ok);
             if (response == .err) return debugError(response);
         }
 
         pub fn putExpire(self: Self, key: []const u8, value: []const u8, expiration: i32) !void {
             // TODO: pipeline
-            const set_response = try self.execute(.set, .{ key, value });
+            const set_response = try self.execute(.set, null, .{ key, value });
             std.debug.assert(set_response == .ok);
             if (set_response == .err) return debugError(set_response);
 
@@ -421,22 +438,21 @@ pub fn ValkeyBackend(comptime options: Options) type {
             // https://valkey.io/commands/expire/
             var buf: [16]u8 = undefined;
             const expiration_formatted = try std.fmt.bufPrint(&buf, "{d}", .{expiration});
-            const expire_response = try self.execute(.expire, .{ key, expiration_formatted });
+            const expire_response = try self.execute(.expire, null, .{ key, expiration_formatted });
 
             std.debug.assert(expire_response == .integer);
             if (expire_response == .err) return debugError(expire_response);
         }
 
         pub fn remove(self: Self, key: []const u8) !void {
-            const response = try self.execute(.del, .{key});
+            const response = try self.execute(.del, null, .{key});
             std.debug.assert(response == .integer);
             std.debug.assert(response.integer.value == 1);
             if (response == .err) return debugError(response);
         }
 
         pub fn fetchRemove(self: Self, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
-            _ = allocator;
-            const response = try self.execute(.getdel, .{key});
+            const response = try self.execute(.getdel, allocator, .{key});
             std.debug.assert(response == .null or response == .string);
             if (response == .err) return debugError(response);
             return switch (response) {
@@ -447,20 +463,19 @@ pub fn ValkeyBackend(comptime options: Options) type {
         }
 
         pub fn append(self: Self, key: []const u8, value: []const u8) !void {
-            const response = try self.execute(.rpush, .{ key, value });
+            const response = try self.execute(.rpush, null, .{ key, value });
             std.debug.assert(response == .integer);
             if (response == .err) return debugError(response);
         }
 
         pub fn prepend(self: Self, key: []const u8, value: []const u8) !void {
-            const response = try self.execute(.lpush, .{ key, value });
+            const response = try self.execute(.lpush, null, .{ key, value });
             std.debug.assert(response == .integer);
             if (response == .err) return debugError(response);
         }
 
         pub fn pop(self: Self, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
-            _ = allocator;
-            const response = try self.execute(.rpop, .{key});
+            const response = try self.execute(.rpop, allocator, .{key});
             std.debug.assert(response == .null or response == .string);
             if (response == .err) return debugError(response);
             return switch (response) {
@@ -471,8 +486,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
         }
 
         pub fn popFirst(self: Self, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
-            _ = allocator;
-            const response = try self.execute(.lpop, .{key});
+            const response = try self.execute(.lpop, allocator, .{key});
             std.debug.assert(response == .null or response == .string);
             if (response == .err) return debugError(response);
             return switch (response) {
@@ -483,7 +497,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
         }
 
         fn flush(self: Self) !void {
-            const response = try self.execute(.flushdb, .{"sync"});
+            const response = try self.execute(.flushdb, null, .{"sync"});
             std.debug.assert(response == .ok);
             if (response == .err) return debugError(response);
         }
@@ -598,11 +612,15 @@ test "putExpire" {
     try backend.flush();
     try backend.putExpire("foo", "bar", 1);
     const value1 = try backend.get(std.testing.allocator, "foo");
+    // TODO: `get` should receive a buffer so we don't have to hope that the stack buffer hasn't
+    // been wiped when we use it.
+    const value1_dupe = try std.testing.allocator.dupe(u8, value1.?);
+    defer std.testing.allocator.free(value1_dupe);
     std.time.sleep(1.1 * std.time.ns_per_s);
     const value2 = try backend.get(std.testing.allocator, "foo");
 
-    try std.testing.expectEqualStrings("bar", value1.?);
     try std.testing.expect(value2 == null);
+    try std.testing.expectEqualStrings("bar", value1_dupe);
 }
 
 test "put data exceeding buffer size" {
@@ -614,4 +632,28 @@ test "put data exceeding buffer size" {
     const value = try backend.get(std.testing.allocator, "foo");
     defer std.testing.allocator.free(value.?);
     try std.testing.expectEqualStrings(data, value.?);
+}
+
+test "put/get large data" {
+    var backend = try ValkeyBackend(.{ .connect = .lazy }).init(std.testing.allocator);
+    defer backend.deinit();
+    try backend.flush();
+    const stat = try std.fs.cwd().statFile("fixture/blog.json");
+    const ts0 = std.time.nanoTimestamp();
+    const data = try std.fs.cwd().readFileAlloc(std.testing.allocator, "fixture/blog.json", stat.size);
+    defer std.testing.allocator.free(data);
+    const ts1 = std.time.nanoTimestamp();
+    try backend.put("foo", data);
+    const ts2 = std.time.nanoTimestamp();
+    const value = try backend.get(std.testing.allocator, "foo");
+    const ts3 = std.time.nanoTimestamp();
+
+    defer std.testing.allocator.free(value.?);
+    try std.testing.expectEqualStrings(data, value.?);
+
+    std.debug.print("large data load, put, get: {}, {}, {}\n", .{
+        std.fmt.fmtDuration(@intCast(ts1 - ts0)),
+        std.fmt.fmtDuration(@intCast(ts2 - ts1)),
+        std.fmt.fmtDuration(@intCast(ts3 - ts2)),
+    });
 }
