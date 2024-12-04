@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const jetkv = @import("../../jetkv.zig");
+const builtin = @import("builtin");
 
 /// Options specific to the Valkey-based backend.
 pub const Options = struct {
@@ -9,7 +10,8 @@ pub const Options = struct {
     port: u16 = 6379,
     pool_size: u16 = 8,
     buffer_size: u32 = 4096,
-    timeout: u64 = 1 * std.time.ns_per_s,
+    connect_timeout: u64 = 1 * std.time.ns_per_s,
+    read_timeout: u64 = 1 * std.time.ns_per_s,
 
     pub const ConnectMode = enum { auto, manual, lazy };
 };
@@ -63,23 +65,64 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 stream: std.net.Stream = undefined,
                 state: enum { initial, connected } = .initial,
 
+                const sock_flags = std.posix.SOCK.STREAM |
+                    if (builtin.os.tag == .windows)
+                    0
+                else
+                    std.posix.SOCK.CLOEXEC;
+
                 pub fn connect(self: *Connection) !void {
-                    self.stream = try std.net.tcpConnectToHost(
-                        self.allocator,
-                        self.host,
-                        self.port,
-                    );
+                    try self.initStream();
                     self.state = .connected;
-                    const response = try self.execute(.hello, null, .{"3"});
-                    std.debug.assert(response != .err);
+                    try self.handshake();
                 }
 
                 pub fn deinit(self: *Connection) void {
                     if (self.state == .connected) self.stream.close();
                 }
 
+                fn initStream(self: *Connection) !void {
+                    const address_list = try std.net.getAddressList(
+                        self.allocator,
+                        self.host,
+                        self.port,
+                    );
+                    defer address_list.deinit();
+                    const address = for (address_list.addrs) |addr| {
+                        break addr;
+                    } else return error.ConnectionRefused;
+
+                    const sockfd = try std.posix.socket(
+                        address.any.family,
+                        sock_flags,
+                        std.posix.IPPROTO.TCP,
+                    );
+                    const timeout = std.posix.timeval{
+                        .sec = @divFloor(options.read_timeout, std.time.ns_per_s),
+                        .usec = @mod(options.read_timeout, std.time.ns_per_us) * std.time.ns_per_us,
+                    };
+                    try std.posix.setsockopt(
+                        sockfd,
+                        std.posix.SOL.SOCKET,
+                        std.posix.SO.RCVTIMEO,
+                        &std.mem.toBytes(timeout),
+                    );
+                    errdefer std.net.Stream.close(.{ .handle = sockfd });
+
+                    try std.posix.connect(sockfd, &address.any, address.getOsSockLen());
+
+                    self.stream = std.net.Stream{ .handle = sockfd };
+                }
+
+                fn handshake(self: *Connection) !void {
+                    var arena = std.heap.ArenaAllocator.init(self.allocator);
+                    defer arena.deinit();
+                    const response = try self.execute(.hello, arena.allocator(), .{"3"});
+                    if (response == .err) return error.ValkeyInvalidResponse;
+                }
+
                 pub fn execute(
-                    self: Connection,
+                    self: *Connection,
                     comptime command_name: Command.Name,
                     maybe_allocator: ?std.mem.Allocator,
                     args: anytype,
@@ -99,7 +142,14 @@ pub fn ValkeyBackend(comptime options: Options) type {
                     try self.stream.writeAll(buf.items);
 
                     const reader = self.stream.reader();
-                    return Response.parse(allocator, reader);
+                    return Response.parse(allocator, reader) catch |err| {
+                        self.stream.close();
+                        self.state = .initial;
+                        switch (err) {
+                            error.WouldBlock => return error.ValkeyTimeout,
+                            else => return err,
+                        }
+                    };
                 }
             };
 
@@ -110,7 +160,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 while (true) {
                     const vec_available: @Vector(options.pool_size, bool) = self.available;
                     const available_index = std.simd.firstTrue(vec_available) orelse {
-                        try self.condition.timedWait(&self.mutex, options.timeout);
+                        try self.condition.timedWait(&self.mutex, options.connect_timeout);
                         continue;
                     };
                     self.available[available_index] = false;
@@ -185,8 +235,10 @@ pub fn ValkeyBackend(comptime options: Options) type {
                     std.debug.assert(first_token.?.len > 0);
                     const len = try std.fmt.parseInt(u64, first_token.?, 0);
                     const rest = it.rest();
-                    std.debug.assert(rest.len == len + CRLF.len);
-                    return .{ .value = try allocator.dupe(u8, rest[0..len]) };
+                    return if (rest.len == len + CRLF.len and std.mem.endsWith(u8, rest, "\r\n"))
+                        .{ .value = try allocator.dupe(u8, rest[0..len]) }
+                    else
+                        error.ValkeyInvalidResponse;
                 }
             };
 
@@ -263,6 +315,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 const writer = array.writer();
 
                 if (code == '$') {
+                    // TODO Refactor
                     const bytes_to_read = try readInt(reader);
                     try writer.print("{}\r\n", .{bytes_to_read});
                     var string_buf: [options.buffer_size]u8 = undefined;
@@ -298,7 +351,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                     '_' => Response.null,
                     ':' => Response{ .integer = try Response.Integer.init(payload) },
                     '*' => Response{ .array = Response.Array.init() },
-                    else => unreachable,
+                    else => error.ValkeyError,
                 };
             }
 
@@ -400,7 +453,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
             args: anytype,
         ) !Response {
             const connection = try self.pool.acquire();
-            if (options.connect == .lazy and connection.state == .initial) try connection.connect();
+            if (connection.state == .initial) try connection.connect();
             defer self.pool.release(connection);
             return connection.execute(command_name, allocator, args) catch |err|
                 switch (err) {
@@ -656,4 +709,66 @@ test "put/get large data" {
         std.fmt.fmtDuration(@intCast(ts2 - ts1)),
         std.fmt.fmtDuration(@intCast(ts3 - ts2)),
     });
+}
+
+test "valkey slow/incomplete response" {
+    var thread = try std.Thread.spawn(
+        .{ .allocator = std.testing.allocator },
+        launchTestServer,
+        .{"$10\r\noops\r\n"},
+    );
+    defer thread.join();
+
+    var backend = try ValkeyBackend(.{ .connect = .lazy, .host = "127.0.0.1", .port = 63379 })
+        .init(std.testing.allocator);
+    defer backend.deinit();
+
+    try std.testing.expectError(error.ValkeyTimeout, backend.get(std.testing.allocator, "foo"));
+}
+
+test "valkey invalid string response" {
+    var thread = try std.Thread.spawn(
+        .{ .allocator = std.testing.allocator },
+        launchTestServer,
+        .{"$2\r\noops\r\n"},
+    );
+    defer thread.join();
+
+    var backend = try ValkeyBackend(.{ .connect = .lazy, .host = "127.0.0.1", .port = 63379 })
+        .init(std.testing.allocator);
+    defer backend.deinit();
+
+    try std.testing.expectError(
+        error.ValkeyInvalidResponse,
+        backend.get(std.testing.allocator, "foo"),
+    );
+}
+
+test "valkey invalid integer response" {
+    var thread = try std.Thread.spawn(
+        .{ .allocator = std.testing.allocator },
+        launchTestServer,
+        .{":123"},
+    );
+    defer thread.join();
+
+    var backend = try ValkeyBackend(.{ .connect = .lazy, .host = "127.0.0.1", .port = 63379 })
+        .init(std.testing.allocator);
+    defer backend.deinit();
+
+    try std.testing.expectError(
+        error.ValkeyTimeout, // we timed out waiting for `\r\n`
+        backend.get(std.testing.allocator, "foo"),
+    );
+}
+
+fn launchTestServer(response: []const u8) void {
+    const address = std.net.Address.parseIp("127.0.0.1", 63379) catch unreachable;
+    var server = address.listen(.{ .reuse_address = true }) catch unreachable;
+    defer server.deinit();
+
+    const connection = server.accept() catch unreachable;
+    var buf: [1024]u8 = undefined;
+    _ = connection.stream.read(&buf) catch unreachable;
+    connection.stream.writeAll(response) catch unreachable;
 }
