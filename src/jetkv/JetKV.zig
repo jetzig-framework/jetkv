@@ -79,11 +79,19 @@ pub fn JetKV(comptime options: Options) type {
 
         /// Store a String in the key-value store with an expiration time in seconds.
         pub fn putExpire(self: *Self, key: []const u8, value: []const u8, expiration: i32) !void {
-            switch (self.backend) {
-                .valkey => |*backend| try backend.putExpire(key, value, expiration),
-                // TODO: Currently `putExpire` is identical to `put` for memory/file backends.
-                .memory => |*backend| try backend.put(key, value),
-                .file => |*backend| try backend.put(key, value),
+            switch (comptime options.backend) {
+                .valkey => try self.backend.valkey.putExpire(
+                    key,
+                    value,
+                    expiration,
+                ),
+                .memory => try self.backend.memory.putExpire(
+                    key,
+                    value,
+                    expiration,
+                ),
+                // TODO: Currently `putExpire` is identical to `put` for file backend.
+                .file => @compileError("putExpire is not supported by the FileBackend"),
             }
         }
 
@@ -315,4 +323,59 @@ test "valkey backend" {
     }
 
     try std.testing.expect(try jet_kv.get(std.testing.allocator, "baz") == null);
+}
+
+test "putExpire" {
+    var memory_jet_kv = try JetKV(.{ .backend = .memory }).init(std.testing.allocator);
+    defer memory_jet_kv.deinit();
+
+    var file_jet_kv = try JetKV(.{
+        .backend = .file,
+        .file_backend_options = .{ .path = "/tmp/jetkv.db", .truncate = true },
+    }).init(std.testing.allocator);
+    defer file_jet_kv.deinit();
+
+    var valkey_jet_kv = try JetKV(.{
+        .backend = .valkey,
+        .valkey_backend_options = .{
+            .pool_size = 8,
+            .buffer_size = 8192,
+        },
+    }).init(std.testing.allocator);
+    defer valkey_jet_kv.deinit();
+
+    const key = "foo";
+    const value = "bar";
+
+    try memory_jet_kv.putExpire(key, value, 1);
+    // TODO
+    // try file_jet_kv.putExpire(key, value, 1);
+    try valkey_jet_kv.putExpire(key, value, 1);
+
+    if (try memory_jet_kv.get(std.testing.allocator, key)) |capture| {
+        defer std.testing.allocator.free(capture);
+        try std.testing.expectEqualStrings("bar", capture);
+    } else {
+        try std.testing.expect(false);
+    }
+
+    // TODO
+    // if (try file_jet_kv.get(std.testing.allocator, key)) |capture| {
+    //     defer std.testing.allocator.free(capture);
+    //     try std.testing.expectEqualStrings("bar", capture);
+    // } else {
+    //     try std.testing.expect(false);
+    // }
+
+    if (try valkey_jet_kv.get(std.testing.allocator, key)) |capture| {
+        try std.testing.expectEqualStrings("bar", capture);
+    } else {
+        try std.testing.expect(false);
+    }
+
+    std.time.sleep(1.1 * std.time.ns_per_s);
+    try std.testing.expect(try valkey_jet_kv.get(std.testing.allocator, "foo") == null);
+    try std.testing.expect(try memory_jet_kv.get(std.testing.allocator, "foo") == null);
+    // TODO
+    // try std.testing.expect(try file_jet_kv.get(std.testing.allocator, "foo") == null);
 }
