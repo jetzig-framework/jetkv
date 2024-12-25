@@ -3,6 +3,11 @@ const std = @import("std");
 const jetkv = @import("../../jetkv.zig");
 const builtin = @import("builtin");
 
+const backend_supports_vectors = switch (builtin.zig_backend) {
+    .stage2_llvm, .stage2_c => true,
+    else => false,
+};
+
 /// Options specific to the Valkey-based backend.
 pub const Options = struct {
     connect: ConnectMode = .auto,
@@ -158,8 +163,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 errdefer self.mutex.unlock();
 
                 while (true) {
-                    const vec_available: @Vector(options.pool_size, bool) = self.available;
-                    const available_index = std.simd.firstTrue(vec_available) orelse {
+                    const available_index = self.firstAvailable() orelse {
                         try self.condition.timedWait(&self.mutex, options.connect_timeout);
                         continue;
                     };
@@ -179,6 +183,17 @@ pub fn ValkeyBackend(comptime options: Options) type {
             pub fn deinit(self: *Pool) void {
                 for (self.connections) |connection| {
                     connection.deinit();
+                }
+            }
+
+            fn firstAvailable(self: *Pool) ?usize {
+                if (comptime backend_supports_vectors) {
+                    const vec_available: @Vector(options.pool_size, bool) = self.available;
+                    return if (std.simd.firstTrue(vec_available)) |index| @intCast(index) else null;
+                } else {
+                    return for (self.available, 0..) |available, index| {
+                        if (available) break index;
+                    } else null;
                 }
             }
         };

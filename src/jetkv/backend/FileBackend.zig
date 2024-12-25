@@ -18,7 +18,7 @@ address_space: u32,
 
 const FileBackend = @This();
 
-const hasher = std.hash.XxHash32.hash;
+const hasher = std.hash.Fnv1a_32.hash;
 
 const ValueType = enum(u8) { string, array };
 
@@ -1076,7 +1076,7 @@ fn makeAddress(value_type: ValueType, params: AddressParams) AddressInfo {
 }
 
 fn hash(input: []const u8) u32 {
-    return hasher(0, input);
+    return hasher(input);
 }
 
 fn createFile(path: []const u8, options: std.fs.File.CreateFlags) !std.fs.File {
