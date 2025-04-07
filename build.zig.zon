@@ -1,5 +1,6 @@
 .{
-    .name = "jetkv",
+    .name = .jetkv,
+    .fingerprint = 0x75cf39297ef42bcc,
     .version = "0.0.0",
     .dependencies = .{},
     .paths = .{

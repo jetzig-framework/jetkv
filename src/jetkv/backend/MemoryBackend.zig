@@ -11,7 +11,12 @@ mutex: std.Thread.Mutex,
 
 const Self = @This();
 
-const Array = std.DoublyLinkedList([]const u8);
+const Array = std.DoublyLinkedList;
+const ArrayNode = struct {
+    node: std.DoublyLinkedList.Node = .{},
+    data: []const u8,
+};
+
 const ExpirableString = struct {
     string: []const u8,
     expiry: ?i64,
@@ -40,8 +45,9 @@ pub fn deinit(self: *Self) void {
     while (array_it.next()) |item| {
         self.allocator.free(item.key_ptr.*);
         while (item.value_ptr.*.pop()) |node| {
-            self.allocator.free(node.data);
-            self.allocator.destroy(node);
+            const array_node: *ArrayNode = @fieldParentPtr("node", node);
+            self.allocator.free(array_node.data);
+            self.allocator.destroy(array_node);
         }
         self.allocator.destroy(item.value_ptr.*);
     }
@@ -124,15 +130,15 @@ pub fn append(self: *Self, key: []const u8, value: []const u8) !void {
     defer self.mutex.unlock();
 
     if (self.array_storage.get(key)) |array| {
-        const node = try self.allocator.create(Array.Node);
+        const node = try self.allocator.create(ArrayNode);
         node.* = .{ .data = try self.allocator.dupe(u8, value) };
-        array.append(node);
+        array.append(&node.node);
     } else {
         var array = try self.allocator.create(Array);
         array.* = .{};
-        const node = try self.allocator.create(Array.Node);
+        const node = try self.allocator.create(ArrayNode);
         node.* = .{ .data = try self.allocator.dupe(u8, value) };
-        array.append(node);
+        array.append(&node.node);
         try self.array_storage.put(try self.allocator.dupe(u8, key), array);
     }
 }
@@ -143,15 +149,15 @@ pub fn prepend(self: *Self, key: []const u8, value: []const u8) !void {
     defer self.mutex.unlock();
 
     if (self.array_storage.get(key)) |array| {
-        const node = try self.allocator.create(Array.Node);
+        const node = try self.allocator.create(ArrayNode);
         node.* = .{ .data = try self.allocator.dupe(u8, value) };
-        array.prepend(node);
+        array.prepend(&node.node);
     } else {
         const array = try self.allocator.create(Array);
         array.* = .{};
-        const node = try self.allocator.create(Array.Node);
+        const node = try self.allocator.create(ArrayNode);
         node.* = .{ .data = try self.allocator.dupe(u8, value) };
-        array.append(node);
+        array.append(&node.node);
         try self.array_storage.put(try self.allocator.dupe(u8, key), array);
     }
 }
@@ -162,7 +168,8 @@ pub fn pop(self: *Self, allocator: std.mem.Allocator, key: []const u8) !?[]const
     defer self.mutex.unlock();
 
     if (self.array_storage.get(key)) |array| {
-        if (array.pop()) |last_item| {
+        if (array.pop()) |last_node| {
+            const last_item: *ArrayNode = @fieldParentPtr("node", last_node);
             const value = try allocator.dupe(u8, last_item.data);
             self.allocator.free(last_item.data);
             self.allocator.destroy(last_item);
@@ -181,7 +188,8 @@ pub fn popFirst(self: *Self, allocator: std.mem.Allocator, key: []const u8) !?[]
     defer self.mutex.unlock();
 
     if (self.array_storage.get(key)) |array| {
-        if (array.popFirst()) |last_item| {
+        if (array.popFirst()) |last_node| {
+            const last_item: *ArrayNode = @fieldParentPtr("node", last_node);
             const value = try allocator.dupe(u8, last_item.data);
             self.allocator.free(last_item.data);
             self.allocator.destroy(last_item);
