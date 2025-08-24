@@ -434,8 +434,12 @@ fn shrinkArray(self: FileBackend, first_item_address: AddressInfo, last_item_add
 // Initialize address space with zeroes.
 fn initAddressSpace(self: FileBackend) !void {
     try self.file.seekTo(0 + header_len);
-    const writer = self.file.writer();
-    try writer.writeByteNTimes(0, @intCast(self.address_space_size));
+    var i: usize = 0;
+    const size: usize = @intCast(self.address_space_size);
+
+    while (i < size) : (i += 1) {
+        try self.file.writeAll(&[_]u8{0});
+    }
 }
 
 fn initHeader(self: FileBackend) !void {
@@ -859,11 +863,16 @@ fn writeString(
     );
 
     try self.file.seekTo(end_pos);
-    const writer = self.file.writer();
-    try writer.writeAll(&address_buf);
-    try writer.writeAll(key);
-    try writer.writeAll(value);
-    try writer.writeByteNTimes(0, max_value_len - value.len);
+    try self.file.writeAll(&address_buf);
+    try self.file.writeAll(key);
+    try self.file.writeAll(value);
+
+    var i: usize = 0;
+    const size: usize = max_value_len - value.len;
+
+    while (i < size) : (i += 1) {
+        try self.file.writeAll(&[_]u8{0});
+    }
 }
 
 // Round value length up to a nearby number for over-allocation purposes to allow re-use of
