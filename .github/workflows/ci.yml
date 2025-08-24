@@ -11,10 +11,18 @@ on:
 
 jobs:
   test:
-    strategy:
-      matrix:
-        platform: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+
+    services:
+      valkey:
+        image: valkey/valkey:7.2-alpine
+        ports:
+          - 6379: 6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -24,16 +32,10 @@ jobs:
         with:
           version: master
 
-      - name: Setup Nix
-        uses: cachix/install-nix-action@v31
-        with:
-          nix_path: nixpkgs=channel:nixos-25.11
-      
-      - name: Build nix
-        if: matrix.platform != 'windows-latest'
+      - name: Verify Valkey connection
         run: |
-          nix-build
-          nix-shell -p valkey
+          timeout 30 bash -c 'until valkey-cli -h localhost -p 6379 ping; do sleep 1; done'
+          echo "Valkey ready"
 
       - name: Print Zig Version
         run: zig version
@@ -43,4 +45,7 @@ jobs:
 
       - name: Run Tests
         run: |
-          valkey-server --daemonize yes && zig build test --summary all
+          zig build test --summary all
+        env:
+          VALKEY_HOST: 127.0.0.1
+          VALKEY_PORT: 6379
