@@ -32,11 +32,6 @@ jobs:
         with:
           version: master
 
-      - name: Verify Valkey connection
-        run: |
-          timeout 30 bash -c 'until valkey-cli -h localhost -p 6379 ping; do sleep 1; done'
-          echo "Valkey ready"
-
       - name: Print Zig Version
         run: zig version
 
