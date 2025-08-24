@@ -33,7 +33,7 @@ jobs:
         run: |
           nix-build
           nix-shell -p valkey
-        if: matrix.platform != windows-latest
+        if: matrix.platform != "windows-latest"
 
       - name: Print Zig Version
         run: zig version
