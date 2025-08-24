@@ -376,7 +376,7 @@ test "putExpire" {
         try std.testing.expect(false);
     }
 
-    std.time.sleep(1.1 * std.time.ns_per_s);
+    std.Thread.sleep(1.1 * std.time.ns_per_s);
     try std.testing.expect(try valkey_jet_kv.get(std.testing.allocator, "foo") == null);
     try std.testing.expect(try memory_jet_kv.get(std.testing.allocator, "foo") == null);
     // TODO

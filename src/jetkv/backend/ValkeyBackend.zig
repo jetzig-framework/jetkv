@@ -72,9 +72,9 @@ pub fn ValkeyBackend(comptime options: Options) type {
 
                 const sock_flags = std.posix.SOCK.STREAM |
                     if (builtin.os.tag == .windows)
-                    0
-                else
-                    std.posix.SOCK.CLOEXEC;
+                        0
+                    else
+                        std.posix.SOCK.CLOEXEC;
 
                 pub fn connect(self: *Connection) !void {
                     try self.initStream();
@@ -138,7 +138,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                         self.allocator,
                     );
                     const allocator = maybe_allocator orelse stack_fallback.get();
-                    var buf = std.ArrayList(u8).init(allocator);
+                    var buf = std.array_list.Managed(u8).init(allocator);
                     defer buf.deinit();
                     const writer = buf.writer();
 
@@ -146,8 +146,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                     try command.write(writer, args);
                     try self.stream.writeAll(buf.items);
 
-                    const reader = self.stream.reader();
-                    return Response.parse(allocator, reader) catch |err| {
+                    return Response.parse(allocator, &self.stream) catch |err| {
                         self.stream.close();
                         self.state = .initial;
                         switch (err) {
@@ -297,14 +296,15 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 }
             };
 
-            fn parse(allocator: std.mem.Allocator, reader: anytype) !Response {
-                const code = try reader.readByte();
-
+            fn parse(allocator: std.mem.Allocator, stream: *std.net.Stream) !Response {
+                var byte_buf: [1]u8 = undefined;
+                _ = try stream.read(&byte_buf);
+                const code = byte_buf[0];
                 const parts_count = switch (code) {
                     '-', '+', '_', ':' => 1,
-                    '*' => try readInt(reader),
+                    '*' => try readInt(stream),
                     '$' => 2,
-                    '%' => try readInt(reader),
+                    '%' => try readInt(stream),
                     else => {
                         std.debug.print("Valkey Unsupported Response: `{c}`\n", .{code});
                         return error.ValkeyUnsupportedResponse;
@@ -316,8 +316,8 @@ pub fn ValkeyBackend(comptime options: Options) type {
                     // that the next response is clean but we don't support them as values. We
                     // get a Map response from the initial `HELLO` handshake.
                     for (0..parts_count) |_| {
-                        const key = try parse(allocator, reader);
-                        const value = try parse(allocator, reader);
+                        const key = try parse(allocator, stream);
+                        const value = try parse(allocator, stream);
                         _ = key;
                         _ = value;
                     }
@@ -325,33 +325,33 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 }
 
                 // Backed by stack-fallback allocator:
-                var array = std.ArrayList(u8).init(allocator);
+                var array = std.array_list.Managed(u8).init(allocator);
                 defer array.deinit();
                 const writer = array.writer();
 
                 if (code == '$') {
-                    // TODO Refactor
-                    const bytes_to_read = try readInt(reader);
+                    // TODO: Refactor
+                    const bytes_to_read = try readInt(stream);
                     try writer.print("{}\r\n", .{bytes_to_read});
                     var string_buf: [options.buffer_size]u8 = undefined;
                     var total_bytes_read: usize = 0;
                     while (true) {
-                        const end = std.mem.min(
-                            usize,
-                            &.{ string_buf.len, bytes_to_read - total_bytes_read },
+                        const end = @min(
+                            string_buf.len,
+                            bytes_to_read - total_bytes_read,
                         );
-                        const bytes_read = try reader.read(
+                        const bytes_read = try stream.read(
                             string_buf[0..end],
                         );
                         total_bytes_read += bytes_read;
                         try array.appendSlice(string_buf[0..bytes_read]);
                         if (total_bytes_read == bytes_to_read) {
-                            try readUntilTerminator(writer, reader);
+                            try readUntilTerminator(writer, stream);
                             break;
                         }
                     }
                 } else {
-                    try readParts(writer, parts_count, reader);
+                    try readParts(writer, parts_count, stream);
                 }
 
                 const payload = array.items;
@@ -370,22 +370,24 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 };
             }
 
-            fn readInt(reader: anytype) !u64 {
+            fn readInt(stream: *std.net.Stream) !u64 {
                 var buf: [20]u8 = undefined;
-                var stream = std.io.fixedBufferStream(&buf);
-                const writer = stream.writer();
-                try readUntilTerminator(writer, reader);
-                const value = stream.getWritten();
+                var fixed_stream = std.io.fixedBufferStream(&buf);
+                const writer = fixed_stream.writer();
+                try readUntilTerminator(writer, stream);
+                const value = fixed_stream.getWritten();
                 std.debug.assert(std.mem.endsWith(u8, value, CRLF));
                 return try std.fmt.parseInt(u64, value[0 .. value.len - 2], 10);
             }
 
-            fn readUntilTerminator(writer: anytype, reader: anytype) !void {
+            fn readUntilTerminator(writer: anytype, stream: *std.net.Stream) !void {
                 var cr = false;
                 var buf: [options.buffer_size]u8 = undefined;
                 var cursor: usize = 0;
                 while (true) {
-                    const byte = try reader.readByte();
+                    var byte_buf: [1]u8 = undefined;
+                    _ = try stream.read(&byte_buf);
+                    const byte = byte_buf[0];
                     if (byte == '\r') cr = true;
                     buf[cursor] = byte;
                     cursor += 1;
@@ -400,9 +402,9 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 }
             }
 
-            fn readParts(writer: anytype, parts_count: usize, reader: anytype) !void {
+            fn readParts(writer: anytype, parts_count: usize, stream: *std.net.Stream) !void {
                 for (0..parts_count) |_| {
-                    try readUntilTerminator(writer, reader);
+                    try readUntilTerminator(writer, stream);
                 }
             }
         };
@@ -472,12 +474,12 @@ pub fn ValkeyBackend(comptime options: Options) type {
             defer self.pool.release(connection);
             return connection.execute(command_name, allocator, args) catch |err|
                 switch (err) {
-                error.EndOfStream, error.BrokenPipe => blk: {
-                    try connection.connect();
-                    break :blk err;
-                },
-                else => err,
-            };
+                    error.BrokenPipe => blk: {
+                        try connection.connect();
+                        break :blk err;
+                    },
+                    else => err,
+                };
         }
 
         pub fn get(self: Self, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
@@ -572,7 +574,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
 
         fn debugError(response: Response) error{ValkeyError} {
             std.debug.assert(response == .err);
-            std.debug.print("{}\n", .{response});
+            std.debug.print("{any}\n", .{response});
             return error.ValkeyError;
         }
     };
@@ -695,7 +697,7 @@ test "putExpire" {
     try backend.putExpire("foo", "bar", 1);
     const value1 = try backend.get(std.testing.allocator, "foo");
     defer std.testing.allocator.free(value1.?);
-    std.time.sleep(1.1 * std.time.ns_per_s);
+    std.Thread.sleep(1.1 * std.time.ns_per_s);
     const value2 = try backend.get(std.testing.allocator, "foo");
 
     try std.testing.expect(value2 == null);
@@ -730,10 +732,10 @@ test "put/get large data" {
 
     try std.testing.expectEqualStrings(data, value.?);
 
-    std.debug.print("large data load, put, get: {}, {}, {}\n", .{
-        std.fmt.fmtDuration(@intCast(ts1 - ts0)),
-        std.fmt.fmtDuration(@intCast(ts2 - ts1)),
-        std.fmt.fmtDuration(@intCast(ts3 - ts2)),
+    std.debug.print("large data load, put, get: {any}, {any}, {any}\n", .{
+        ts1 - ts0,
+        ts2 - ts1,
+        ts3 - ts2,
     });
 }
 
@@ -795,6 +797,6 @@ fn launchTestServer(response: []const u8) void {
 
     const connection = server.accept() catch unreachable;
     var buf: [1024]u8 = undefined;
-    _ = connection.stream.read(&buf) catch unreachable;
+    _ = connection.stream.reader(&buf);
     connection.stream.writeAll(response) catch unreachable;
 }

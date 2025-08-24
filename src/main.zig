@@ -41,8 +41,8 @@ pub fn main() !void {
         .{
             thread_count,
             count * thread_count,
-            std.fmt.fmtDuration(end - start),
-            std.fmt.fmtDuration((end - start) / count / thread_count),
+            (end - start),
+            ((end - start) / count / thread_count),
             ((count * thread_count) / @as(f32, @floatFromInt(end - start))) * std.time.ns_per_s,
         },
     );
