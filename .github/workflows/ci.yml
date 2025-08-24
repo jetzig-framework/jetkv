@@ -30,10 +30,10 @@ jobs:
           nix_path: nixpkgs=channel:nixos-25.11
       
       - name: Build nix
+        if: matrix.platform != 'windows-latest'
         run: |
           nix-build
           nix-shell -p valkey
-        if: matrix.platform != "windows-latest"
 
       - name: Print Zig Version
         run: zig version
