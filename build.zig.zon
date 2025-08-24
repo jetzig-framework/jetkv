@@ -2,6 +2,7 @@
     .name = .jetkv,
     .fingerprint = 0x75cf39297ef42bcc,
     .version = "0.0.0",
+    .minimum_zig_version = "0.15.1",
     .dependencies = .{},
     .paths = .{
         "",

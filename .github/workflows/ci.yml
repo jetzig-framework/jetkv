@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_requests:
+    branches: [ main ]
+  schedule:
+    - cron: "0 0 * * *"
+  workfow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        platform: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: master
+
+      - name: Print zig version
+        run: zig version
+
+      - name: Build
+        run: zig build --verbose
+
+      - name: Run Tests
+        run: |
+          zig build test --summary all
+
+      - name: Formatting check
+        run: zig fmt --check .

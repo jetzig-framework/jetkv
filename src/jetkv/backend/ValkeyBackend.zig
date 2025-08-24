@@ -1,5 +1,5 @@
 const std = @import("std");
-
+const ArrayList = std.array_list.Managed;
 const jetkv = @import("../../jetkv.zig");
 const builtin = @import("builtin");
 
@@ -72,9 +72,9 @@ pub fn ValkeyBackend(comptime options: Options) type {
 
                 const sock_flags = std.posix.SOCK.STREAM |
                     if (builtin.os.tag == .windows)
-                    0
-                else
-                    std.posix.SOCK.CLOEXEC;
+                        0
+                    else
+                        std.posix.SOCK.CLOEXEC;
 
                 pub fn connect(self: *Connection) !void {
                     try self.initStream();
@@ -138,7 +138,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                         self.allocator,
                     );
                     const allocator = maybe_allocator orelse stack_fallback.get();
-                    var buf = std.ArrayList(u8).init(allocator);
+                    var buf = ArrayList(u8).init(allocator);
                     defer buf.deinit();
                     const writer = buf.writer();
 
@@ -146,7 +146,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                     try command.write(writer, args);
                     try self.stream.writeAll(buf.items);
 
-                    const reader = self.stream.reader();
+                    const reader = self.stream.reader(&.{});
                     return Response.parse(allocator, reader) catch |err| {
                         self.stream.close();
                         self.state = .initial;
@@ -325,7 +325,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 }
 
                 // Backed by stack-fallback allocator:
-                var array = std.ArrayList(u8).init(allocator);
+                var array = ArrayList(u8).init(allocator);
                 defer array.deinit();
                 const writer = array.writer();
 
@@ -472,12 +472,12 @@ pub fn ValkeyBackend(comptime options: Options) type {
             defer self.pool.release(connection);
             return connection.execute(command_name, allocator, args) catch |err|
                 switch (err) {
-                error.EndOfStream, error.BrokenPipe => blk: {
-                    try connection.connect();
-                    break :blk err;
-                },
-                else => err,
-            };
+                    error.EndOfStream, error.BrokenPipe => blk: {
+                        try connection.connect();
+                        break :blk err;
+                    },
+                    else => err,
+                };
         }
 
         pub fn get(self: Self, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
