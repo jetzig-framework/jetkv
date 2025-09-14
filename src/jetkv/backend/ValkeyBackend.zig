@@ -1,4 +1,7 @@
 const std = @import("std");
+const Writer = std.Io.Writer;
+const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 
 const jetkv = @import("../../jetkv.zig");
 const builtin = @import("builtin");
@@ -18,12 +21,12 @@ pub const Options = struct {
     connect_timeout: u64 = 1 * std.time.ns_per_s,
     read_timeout: u64 = 1 * std.time.ns_per_s,
 
-    pub const ConnectMode = enum { auto, manual, lazy };
+    const ConnectMode = enum { auto, manual, lazy };
 };
 
 pub fn ValkeyBackend(comptime options: Options) type {
     return struct {
-        allocator: std.mem.Allocator,
+        allocator: Allocator,
         options: Options,
         state: enum { initial, connected } = .initial,
         pool: *Pool,
@@ -31,7 +34,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
         const Self = @This();
 
         /// Initialize a new Valkey backend.
-        pub fn init(allocator: std.mem.Allocator) !Self {
+        pub fn init(allocator: Allocator) !Self {
             var connections: [options.pool_size]*Pool.Connection = undefined;
             for (0..options.pool_size) |index| {
                 connections[index] = try allocator.create(Pool.Connection);
@@ -44,9 +47,13 @@ pub fn ValkeyBackend(comptime options: Options) type {
             }
             const pool = try allocator.create(Pool);
             pool.* = Pool{ .connections = connections };
-            var backend = Self{ .allocator = allocator, .options = options, .pool = pool };
-            if (options.connect == .auto) try backend.connect();
-            return backend;
+            var vk: Self = .{
+                .allocator = allocator,
+                .options = options,
+                .pool = pool,
+            };
+            if (options.connect == .auto) try vk.connect();
+            return vk;
         }
 
         /// Attempt to connect to the configured Valkey host.
@@ -63,7 +70,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
             condition: std.Thread.Condition = .{},
 
             const Connection = struct {
-                allocator: std.mem.Allocator,
+                allocator: Allocator,
                 host: []const u8,
                 port: u16,
                 index: usize,
@@ -129,7 +136,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 pub fn execute(
                     self: *Connection,
                     comptime command_name: Command.Name,
-                    maybe_allocator: ?std.mem.Allocator,
+                    maybe_allocator: ?Allocator,
                     args: anytype,
                 ) !Response {
                     std.debug.assert(self.state == .connected);
@@ -138,13 +145,14 @@ pub fn ValkeyBackend(comptime options: Options) type {
                         self.allocator,
                     );
                     const allocator = maybe_allocator orelse stack_fallback.get();
-                    var buf = std.array_list.Managed(u8).init(allocator);
-                    defer buf.deinit();
-                    const writer = buf.writer();
+                    var aw: Writer.Allocating = .init(self.allocator);
+                    defer aw.deinit();
 
                     const command = Command{ .name = command_name };
-                    try command.write(writer, args);
-                    try self.stream.writeAll(buf.items);
+                    try command.write(&aw.writer, args);
+                    const output = try aw.toOwnedSlice();
+                    defer self.allocator.free(output);
+                    try self.stream.writeAll(output);
 
                     return Response.parse(allocator, &self.stream) catch |err| {
                         self.stream.close();
@@ -242,7 +250,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
             const String = struct {
                 value: []const u8,
 
-                fn init(allocator: std.mem.Allocator, data: []const u8) !String {
+                fn init(allocator: Allocator, data: []const u8) !String {
                     var it = std.mem.tokenizeSequence(u8, data, CRLF);
                     const first_token = it.next();
                     std.debug.assert(first_token != null);
@@ -265,7 +273,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 }
             };
 
-            pub fn format(self: Response, _: anytype, _: anytype, writer: anytype) !void {
+            pub fn format(self: Response, _: anytype, _: anytype, writer: *Writer) !void {
                 switch (self) {
                     .map => try writer.print("Response.map", .{}),
                     .err => |err| try writer.print("Response.err{{ .err = {s} }}", .{err.data}),
@@ -296,7 +304,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 }
             };
 
-            fn parse(allocator: std.mem.Allocator, stream: *std.net.Stream) !Response {
+            fn parse(allocator: Allocator, stream: *std.net.Stream) !Response {
                 var byte_buf: [1]u8 = undefined;
                 _ = try stream.read(&byte_buf);
                 const code = byte_buf[0];
@@ -325,14 +333,13 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 }
 
                 // Backed by stack-fallback allocator:
-                var array = std.array_list.Managed(u8).init(allocator);
-                defer array.deinit();
-                const writer = array.writer();
+                var aw: Writer.Allocating = .init(allocator);
+                defer aw.deinit();
 
                 if (code == '$') {
                     // TODO: Refactor
                     const bytes_to_read = try readInt(stream);
-                    try writer.print("{}\r\n", .{bytes_to_read});
+                    try aw.writer.print("{}\r\n", .{bytes_to_read});
                     var string_buf: [options.buffer_size]u8 = undefined;
                     var total_bytes_read: usize = 0;
                     while (true) {
@@ -344,17 +351,16 @@ pub fn ValkeyBackend(comptime options: Options) type {
                             string_buf[0..end],
                         );
                         total_bytes_read += bytes_read;
-                        try array.appendSlice(string_buf[0..bytes_read]);
+                        _ = try aw.writer.write(string_buf[0..bytes_read]);
                         if (total_bytes_read == bytes_to_read) {
-                            try readUntilTerminator(writer, stream);
+                            try readUntilTerminator(&aw.writer, stream);
                             break;
                         }
                     }
-                } else {
-                    try readParts(writer, parts_count, stream);
-                }
+                } else try readParts(&aw.writer, parts_count, stream);
 
-                const payload = array.items;
+                const payload = try aw.toOwnedSlice();
+                defer allocator.free(payload);
 
                 return switch (code) {
                     '-' => Response{ .err = Response.Error.init(payload) },
@@ -372,15 +378,14 @@ pub fn ValkeyBackend(comptime options: Options) type {
 
             fn readInt(stream: *std.net.Stream) !u64 {
                 var buf: [20]u8 = undefined;
-                var fixed_stream = std.io.fixedBufferStream(&buf);
-                const writer = fixed_stream.writer();
-                try readUntilTerminator(writer, stream);
-                const value = fixed_stream.getWritten();
+                var writer: Writer = .fixed(&buf);
+                try readUntilTerminator(&writer, stream);
+                const value = writer.buffered();
                 std.debug.assert(std.mem.endsWith(u8, value, CRLF));
-                return try std.fmt.parseInt(u64, value[0 .. value.len - 2], 10);
+                return std.fmt.parseInt(u64, value[0 .. value.len - 2], 10);
             }
 
-            fn readUntilTerminator(writer: anytype, stream: *std.net.Stream) !void {
+            fn readUntilTerminator(writer: *Writer, stream: *std.net.Stream) !void {
                 var cr = false;
                 var buf: [options.buffer_size]u8 = undefined;
                 var cursor: usize = 0;
@@ -402,7 +407,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 }
             }
 
-            fn readParts(writer: anytype, parts_count: usize, stream: *std.net.Stream) !void {
+            fn readParts(writer: *Writer, parts_count: usize, stream: *std.net.Stream) !void {
                 for (0..parts_count) |_| {
                     try readUntilTerminator(writer, stream);
                 }
@@ -426,7 +431,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 expire,
             };
 
-            pub fn write(comptime self: Command, writer: anytype, args: anytype) !void {
+            pub fn write(comptime self: Command, writer: *Writer, args: anytype) !void {
                 // Valkey supports multiple values for some commands. For consistency with other backends
                 // we only support one value (e.g. `DEL`, `RPUSH`, etc.).
                 const command = comptime blk: {
@@ -466,7 +471,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
         pub fn execute(
             self: Self,
             comptime command_name: Command.Name,
-            allocator: ?std.mem.Allocator,
+            allocator: ?Allocator,
             args: anytype,
         ) !Response {
             const connection = try self.pool.acquire();
@@ -482,7 +487,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 };
         }
 
-        pub fn get(self: Self, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
+        pub fn get(self: Self, allocator: Allocator, key: []const u8) !?[]const u8 {
             const response = try self.execute(.get, allocator, .{key});
             std.debug.assert(response == .null or response == .string);
             return switch (response) {
@@ -521,7 +526,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
             if (response == .err) return debugError(response);
         }
 
-        pub fn fetchRemove(self: Self, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
+        pub fn fetchRemove(self: Self, allocator: Allocator, key: []const u8) !?[]const u8 {
             const response = try self.execute(.getdel, allocator, .{key});
             std.debug.assert(response == .null or response == .string);
             if (response == .err) return debugError(response);
@@ -544,7 +549,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
             if (response == .err) return debugError(response);
         }
 
-        pub fn pop(self: Self, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
+        pub fn pop(self: Self, allocator: Allocator, key: []const u8) !?[]const u8 {
             const response = try self.execute(.rpop, allocator, .{key});
             std.debug.assert(response == .null or response == .string);
             if (response == .err) return debugError(response);
@@ -555,7 +560,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
             };
         }
 
-        pub fn popFirst(self: Self, allocator: std.mem.Allocator, key: []const u8) !?[]const u8 {
+        pub fn popFirst(self: Self, allocator: Allocator, key: []const u8) !?[]const u8 {
             const response = try self.execute(.lpop, allocator, .{key});
             std.debug.assert(response == .null or response == .string);
             if (response == .err) return debugError(response);
@@ -721,7 +726,7 @@ test "put/get large data" {
     try backend.flush();
     const stat = try std.fs.cwd().statFile("fixture/blog.json");
     const ts0 = std.time.nanoTimestamp();
-    const data = try std.fs.cwd().readFileAlloc(std.testing.allocator, "fixture/blog.json", stat.size);
+    const data = try std.fs.cwd().readFileAlloc(std.testing.allocator, "fixture/blog.json", @intCast(stat.size));
     defer std.testing.allocator.free(data);
     const ts1 = std.time.nanoTimestamp();
     try backend.put("foo", data);
