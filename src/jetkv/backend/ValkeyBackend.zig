@@ -235,6 +235,8 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 fn init(data: []const u8) Error {
                     const err = "ERR ";
                     std.debug.assert(data.len <= options.buffer_size);
+                    std.debug.print("Error data: '{s}'\n", .{data});
+                    std.debug.print("Expected prefix: '{s}'\n", .{err});
                     std.debug.assert(std.mem.startsWith(u8, data, err));
                     const payload = data[err.len..];
                     var buf: [options.buffer_size]u8 = undefined;
