@@ -1,4 +1,7 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+const GeneralPurposeAllocator = std.heap.GeneralPurposeAllocator;
+const Thread = std.Thread;
 
 const jetkv = @import("jetkv.zig");
 
@@ -11,16 +14,16 @@ const KV = jetkv.JetKV(.{
 });
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: GeneralPurposeAllocator(.{}) = .init;
     const allocator = gpa.allocator();
 
     var kv = try KV.init(allocator);
     try kv.put("foo", "bar");
     const start: usize = @intCast(std.time.nanoTimestamp());
 
-    var threads: [thread_count]std.Thread = undefined;
+    var threads: [thread_count]Thread = undefined;
     for (0..thread_count) |index| {
-        threads[index] = try std.Thread.spawn(
+        threads[index] = try Thread.spawn(
             .{ .allocator = allocator },
             work,
             .{ allocator, &kv },
@@ -48,7 +51,7 @@ pub fn main() !void {
     );
 }
 
-fn work(gpa: std.mem.Allocator, kv: *KV) void {
+fn work(gpa: Allocator, kv: *KV) void {
     var i: usize = 0;
     while (i < count) : (i += 1) {
         var stack_fallback = std.heap.stackFallback(4096, gpa);
