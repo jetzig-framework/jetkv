@@ -94,7 +94,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 }
 
                 fn initStream(self: *Connection) !void {
-                    const address_list = try std.net.getAddressList(
+                    const address_list = try std.Io.net.getAddressList(
                         self.allocator,
                         self.host,
                         self.port,
@@ -119,11 +119,11 @@ pub fn ValkeyBackend(comptime options: Options) type {
                         std.posix.SO.RCVTIMEO,
                         &std.mem.toBytes(timeout),
                     );
-                    errdefer std.net.Stream.close(.{ .handle = sockfd });
+                    errdefer std.Io.net.Stream.close(.{ .handle = sockfd });
 
                     try std.posix.connect(sockfd, &address.any, address.getOsSockLen());
 
-                    self.stream = std.net.Stream{ .handle = sockfd };
+                    self.stream = std.Io.net.Stream{ .handle = sockfd };
                 }
 
                 fn handshake(self: *Connection) !void {
@@ -304,7 +304,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 }
             };
 
-            fn parse(allocator: Allocator, stream: *std.net.Stream) !Response {
+            fn parse(allocator: Allocator, stream: *std.Io.net.Stream) !Response {
                 var byte_buf: [1]u8 = undefined;
                 _ = try stream.read(&byte_buf);
                 const code = byte_buf[0];
@@ -376,7 +376,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 };
             }
 
-            fn readInt(stream: *std.net.Stream) !u64 {
+            fn readInt(stream: *std.Io.net.Stream) !u64 {
                 var buf: [20]u8 = undefined;
                 var writer: Writer = .fixed(&buf);
                 try readUntilTerminator(&writer, stream);
@@ -385,7 +385,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 return std.fmt.parseInt(u64, value[0 .. value.len - 2], 10);
             }
 
-            fn readUntilTerminator(writer: *Writer, stream: *std.net.Stream) !void {
+            fn readUntilTerminator(writer: *Writer, stream: *std.Io.net.Stream) !void {
                 var cr = false;
                 var buf: [options.buffer_size]u8 = undefined;
                 var cursor: usize = 0;
@@ -407,7 +407,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 }
             }
 
-            fn readParts(writer: *Writer, parts_count: usize, stream: *std.net.Stream) !void {
+            fn readParts(writer: *Writer, parts_count: usize, stream: *std.Io.net.Stream) !void {
                 for (0..parts_count) |_| {
                     try readUntilTerminator(writer, stream);
                 }
