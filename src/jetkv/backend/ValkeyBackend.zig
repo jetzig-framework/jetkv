@@ -74,7 +74,7 @@ pub fn ValkeyBackend(comptime options: Options) type {
                 host: []const u8,
                 port: u16,
                 index: usize,
-                stream: std.net.Stream = undefined,
+                stream: std.Io.net.Stream = undefined,
                 state: enum { initial, connected } = .initial,
 
                 const sock_flags = std.posix.SOCK.STREAM |
