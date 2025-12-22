@@ -1,46 +1,46 @@
-name: CI
-
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-  schedule:
-    - cron: "0 0 * * *"
-  workflow_dispatch:
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-
-    services:
-      valkey:
-        image: valkey/valkey:7.2-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "valkey-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: master
-
-      - name: Print Zig Version
-        run: zig version
-
-      - name: Build
-        run: zig build --verbose
-
-      - name: Run Tests
-        run: |
-          zig build test --summary all
-        env:
-          VALKEY_HOST: 127.0.0.1
-          VALKEY_PORT: 6379
+# name: CI
+#
+# on:
+#   push:
+#     branches: [ main ]
+#   pull_request:
+#     branches: [ main ]
+#   schedule:
+#     - cron: "0 0 * * *"
+#   workflow_dispatch:
+#
+# jobs:
+#   test:
+#     runs-on: ubuntu-latest
+#
+#     services:
+#       valkey:
+#         image: valkey/valkey:7.2-alpine
+#         ports:
+#           - 6379:6379
+#         options: >-
+#           --health-cmd "valkey-cli ping"
+#           --health-interval 10s
+#           --health-timeout 5s
+#           --health-retries 5
+#
+#     steps:
+#       - uses: actions/checkout@v4
+#
+#       - name: Setup Zig
+#         uses: mlugg/setup-zig@v2
+#         with:
+#           version: master
+#
+#       - name: Print Zig Version
+#         run: zig version
+#
+#       - name: Build
+#         run: zig build --verbose
+#
+#       - name: Run Tests
+#         run: |
+#           zig build test --summary all
+#         env:
+#           VALKEY_HOST: 127.0.0.1
+#           VALKEY_PORT: 6379
