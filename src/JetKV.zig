@@ -6,7 +6,7 @@ const Backend = @import("Backend.zig");
 
 pub const ValueType = enum { string, array };
 
-pub fn KV(comptime config: anytype) type {
+pub fn Store(comptime config: anytype) type {
     const T = @TypeOf(config);
     return struct {
         const Self = @This();
@@ -65,7 +65,7 @@ pub fn KV(comptime config: anytype) type {
 const t = std.testing;
 
 test "put and get a string value" {
-    var kv = try KV(Backend.Memory{}).init(t.io, t.allocator);
+    var kv = try Store(Backend.Memory{}).init(t.io, t.allocator);
     defer kv.deinit(t.io, t.allocator);
 
     try kv.put(t.io, t.allocator, "foo", "bar");
@@ -79,7 +79,7 @@ test "put and get a string value" {
 }
 
 test "fetchRemove" {
-    var kv = try KV(Backend.Memory{}).init(t.io, t.allocator);
+    var kv = try Store(Backend.Memory{}).init(t.io, t.allocator);
     defer kv.deinit(t.io, t.allocator);
 
     try kv.put(t.io, t.allocator, "foo", "bar");
@@ -93,7 +93,7 @@ test "fetchRemove" {
 }
 
 test "remove" {
-    var kv = try KV(Backend.Memory{}).init(t.io, t.allocator);
+    var kv = try Store(Backend.Memory{}).init(t.io, t.allocator);
     defer kv.deinit(t.io, t.allocator);
 
     try kv.put(t.io, t.allocator, "foo", "bar");
@@ -102,7 +102,7 @@ test "remove" {
 }
 
 test "append and pop a string array" {
-    var kv = try KV(Backend.Memory{}).init(t.io, t.allocator);
+    var kv = try Store(Backend.Memory{}).init(t.io, t.allocator);
     defer kv.deinit(t.io, t.allocator);
 
     const array = &[_][]const u8{ "bar", "baz", "qux", "quux" };
@@ -123,7 +123,7 @@ test "append and pop a string array" {
 }
 
 test "prepend a value in an array" {
-    var kv = try KV(Backend.Memory{}).init(t.io, t.allocator);
+    var kv = try Store(Backend.Memory{}).init(t.io, t.allocator);
     defer kv.deinit(t.io, t.allocator);
 
     for (&[_][]const u8{ "bar", "baz", "qux" }) |item| try kv.append(t.io, t.allocator, "foo", item);
@@ -138,7 +138,7 @@ test "prepend a value in an array" {
 }
 
 test "pop a value from an array" {
-    var kv = try KV(Backend.Memory{}).init(t.io, t.allocator);
+    var kv = try Store(Backend.Memory{}).init(t.io, t.allocator);
     defer kv.deinit(t.io, t.allocator);
 
     for (&[_][]const u8{ "bar", "baz", "qux" }) |item| try kv.append(t.io, t.allocator, "foo", item);
@@ -152,7 +152,7 @@ test "pop a value from an array" {
 }
 
 test "file-based storage" {
-    var kv = try KV(Backend.File{
+    var kv = try Store(Backend.File{
         .path = "/tmp/jetkv.db",
         .truncate = true,
     }).init(t.io, t.allocator);
@@ -169,7 +169,8 @@ test "file-based storage" {
 }
 
 test "valkey backend" {
-    var kv = try KV(Backend.Valkey{}).init(t.io, t.allocator);
+    try requireServer();
+    var kv = try Store(Backend.Valkey{}).init(t.io, t.allocator);
     defer kv.deinit(t.io, t.allocator);
 
     try kv.put(t.io, t.allocator, "foo", "bar");
@@ -182,21 +183,12 @@ test "valkey backend" {
     try t.expect(try kv.get(t.io, t.allocator, "baz") == null);
 }
 
-test "putExpire" {
-    var memory_kv = try KV(Backend.Memory{}).init(t.io, t.allocator);
-    defer memory_kv.deinit(t.io, t.allocator);
-
-    var valkey_kv = try KV(Backend.Valkey{}).init(t.io, t.allocator);
+test "putExpire Valkey" {
+    try requireServer();
+    var valkey_kv = try Store(Backend.Valkey{}).init(t.io, t.allocator);
     defer valkey_kv.deinit(t.io, t.allocator);
 
-    try memory_kv.putExpire(t.io, t.allocator, "foo", "bar", 1);
     try valkey_kv.putExpire(t.io, t.allocator, "foo", "bar", 1);
-
-    if (try memory_kv.get(t.io, t.allocator, "foo")) |capture| {
-        defer t.allocator.free(capture);
-        try t.expectEqualStrings("bar", capture);
-    } else try t.expect(false);
-
     if (try valkey_kv.get(t.io, t.allocator, "foo")) |capture| {
         defer t.allocator.free(capture);
         try t.expectEqualStrings("bar", capture);
@@ -205,6 +197,28 @@ test "putExpire" {
     const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromNanoseconds(1_100_000_000), .clock = .real } };
     try timeout.sleep(t.io);
 
-    try t.expect(try memory_kv.get(t.io, t.allocator, "foo") == null);
     try t.expect(try valkey_kv.get(t.io, t.allocator, "foo") == null);
+}
+
+test "putExpire Memory" {
+    var memory_kv = try Store(Backend.Memory{}).init(t.io, t.allocator);
+    defer memory_kv.deinit(t.io, t.allocator);
+
+    try memory_kv.putExpire(t.io, t.allocator, "foo", "bar", 1);
+
+    if (try memory_kv.get(t.io, t.allocator, "foo")) |capture| {
+        defer t.allocator.free(capture);
+        try t.expectEqualStrings("bar", capture);
+    } else try t.expect(false);
+
+    const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromNanoseconds(1_100_000_000), .clock = .real } };
+    try timeout.sleep(t.io);
+
+    try t.expect(try memory_kv.get(t.io, t.allocator, "foo") == null);
+}
+
+fn requireServer() !void {
+    const address = Io.net.IpAddress.parse("127.0.0.1", 6379) catch unreachable;
+    const stream = address.connect(t.io, .{ .mode = .stream }) catch return error.SkipZigTest;
+    stream.close(t.io);
 }

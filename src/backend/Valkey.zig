@@ -584,6 +584,7 @@ const CRLF = "\r\n";
 const t = std.testing;
 
 test "auto connect" {
+    try requireServer();
     var kv: Valkey = try .init(.{}, t.io, t.allocator);
     const backend = &kv.interface;
     defer backend.deinit(t.io, t.allocator);
@@ -592,6 +593,7 @@ test "auto connect" {
 }
 
 test "manual connect" {
+    try requireServer();
     var kv: Valkey = try .init(.{ .connect_mode = .manual }, t.io, t.allocator);
     const backend = &kv.interface;
     defer backend.deinit(t.io, t.allocator);
@@ -603,6 +605,7 @@ test "manual connect" {
 }
 
 test "lazy connect" {
+    try requireServer();
     var kv: Valkey = try .init(.{ .connect_mode = .lazy }, t.io, t.allocator);
     const backend = &kv.interface;
     defer backend.deinit(t.io, t.allocator);
@@ -614,6 +617,7 @@ test "lazy connect" {
 }
 
 test "put/get" {
+    try requireServer();
     var kv: Valkey = try .init(.{}, t.io, t.allocator);
     const backend = &kv.interface;
     defer backend.deinit(t.io, t.allocator);
@@ -633,6 +637,7 @@ test "put/get" {
 }
 
 test "get missing key" {
+    try requireServer();
     var kv: Valkey = try .init(.{}, t.io, t.allocator);
     const backend = &kv.interface;
     defer backend.deinit(t.io, t.allocator);
@@ -641,6 +646,7 @@ test "get missing key" {
 }
 
 test "remove" {
+    try requireServer();
     var kv: Valkey = try .init(.{}, t.io, t.allocator);
     const backend = &kv.interface;
     defer backend.deinit(t.io, t.allocator);
@@ -654,6 +660,7 @@ test "remove" {
 }
 
 test "fetchRemove" {
+    try requireServer();
     var kv: Valkey = try .init(.{}, t.io, t.allocator);
     const backend = &kv.interface;
     defer backend.deinit(t.io, t.allocator);
@@ -669,6 +676,7 @@ test "fetchRemove" {
 }
 
 test "append/pop" {
+    try requireServer();
     var kv: Valkey = try .init(.{}, t.io, t.allocator);
     const backend = &kv.interface;
     defer backend.deinit(t.io, t.allocator);
@@ -681,6 +689,7 @@ test "append/pop" {
 }
 
 test "prepend/popFirst" {
+    try requireServer();
     var kv: Valkey = try .init(.{}, t.io, t.allocator);
     const backend = &kv.interface;
     defer backend.deinit(t.io, t.allocator);
@@ -693,6 +702,7 @@ test "prepend/popFirst" {
 }
 
 test "putExpire" {
+    try requireServer();
     var kv: Valkey = try .init(.{}, t.io, t.allocator);
     const backend = &kv.interface;
     defer backend.deinit(t.io, t.allocator);
@@ -707,6 +717,7 @@ test "putExpire" {
 }
 
 test "put data exceeding buffer size" {
+    try requireServer();
     var kv: Valkey = try .init(.{}, t.io, t.allocator);
     const backend = &kv.interface;
     defer backend.deinit(t.io, t.allocator);
@@ -719,6 +730,7 @@ test "put data exceeding buffer size" {
 }
 
 test "slow/incomplete response" {
+    try requireServer();
     var thread = try std.Thread.spawn(
         .{ .allocator = t.allocator },
         launchTestServer,
@@ -735,6 +747,7 @@ test "slow/incomplete response" {
 }
 
 test "invalid string response" {
+    try requireServer();
     var thread = try std.Thread.spawn(
         .{ .allocator = t.allocator },
         launchTestServer,
@@ -751,6 +764,7 @@ test "invalid string response" {
 }
 
 test "invalid integer response" {
+    try requireServer();
     var thread = try std.Thread.spawn(
         .{ .allocator = t.allocator },
         launchTestServer,
@@ -776,4 +790,10 @@ fn launchTestServer(response: []const u8) void {
     var w = stream.writer(t.io, &write_buf);
     w.interface.writeAll(response) catch unreachable;
     w.interface.flush() catch unreachable;
+}
+
+fn requireServer() !void {
+    const address = Io.net.IpAddress.parse("127.0.0.1", 6379) catch unreachable;
+    const stream = address.connect(t.io, .{ .mode = .stream }) catch return error.SkipZigTest;
+    stream.close(t.io);
 }

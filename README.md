@@ -28,13 +28,11 @@ _JetKV_ is used by the [Jetzig Web Framework](https://jetzig.dev/) to provide a 
 Recommended for production.
 
 ```zig
-var kv = try JetKV(.{
-    .backend = .valkey,
-    .valkey_backend_options = .{
-        .pool_size = 8,
-        .buffer_size = 8192,
-    },
-}).init(allocator);
+var kv = try jetkv.KV(jetkv.Backend.Valkey{
+    .pool_size = 8,
+    .buffer_size = 8192,
+}).init(io, allocator);
+defer kv.deinit(io, allocator);
 ```
 
 ### Memory Backend
@@ -42,7 +40,8 @@ var kv = try JetKV(.{
 Recommended for local development.
 
 ```zig
-var kv = try JetKV(.{ .backend = .memory }).init(allocator);
+var kv = try jetkv.KV(jetkv.Backend.Memory{}).init(io, allocator);
+kv.deinit(io, allocator);
 ```
 
 ### File Backend
@@ -54,18 +53,15 @@ When using the file allocator, `JetKV.init` receives an allocator in order to pr
 The file passed as the `path` field is locked on startup.
 
 ```zig
-var kv = try JetKV(.{
-    .backend = .file,
-    .file_backend_options = .{
-        // Path to storage file (JetKV stores all data in a single, platform-agnostic file)
-        .path = "/path/to/jetkv.db",
-        // Set to `true` to clear the store on each launch.
-        .truncate = false,
-        // Set the size of the on-disk hash table (each address is currently 4 bytes)
-        // Use `jetkv.addressSpaceSize` to guarantee a valid size if address size changes in future
-        .address_space_size = jetkv.addressSpaceSize(4096),
-    },
-}).init(allocator);
+var kv = try jetkv.KV(jetkv.Backend.File{
+    // Path to storage file (JetKV stores all data in a single, platform-agnostic file)
+    .path = "/path/to/jetkv.db",
+    // Set to `true` to clear the store on each launch.
+    .truncate = false,
+    // Set the size of the on-disk hash table (each address is currently 4 bytes)
+    // Use `jetkv.addressSpaceSize` to guarantee a valid size if address size changes in future
+    .address_space_size = jetkv.addressSpaceSize(4096),
+}).init(io, allocator);
 ```
 
 ### Key-Value Operations
@@ -78,32 +74,32 @@ Read operations receive an allocator to allow separation of internal allocation 
 
 ```zig
 // Put some strings into the KV store
-try kv.put("foo", "baz");
-try kv.put("bar", "qux");
+try kv.put(io, allocator, "foo", "baz");
+try kv.put(io, allocator, "bar", "qux");
 
 // `append` and `prepend` create a new array if one does not already exist
-try kv.append("example_array", "quux");
-try kv.prepend("example_array", "corge");
+try kv.append(io, allocator, "example_array", "quux");
+try kv.prepend(io, allocator, "example_array", "corge");
 
-if (try kv.get(allocator, "foo")) |value| {
+if (try kv.get(io, allocator, "foo")) |value| {
     // "baz"
     allocator.free(value);
 }
 
-if (try kv.fetchRemove(allocator, "bar")) |value| {
+if (try kv.fetchRemove(io, allocator, "bar")) |value| {
     // "qux"
     allocator.free(value);
 }
 
 // Remove a string from the KV store. Does not remove arrays.
-try kv.remove("foo");
+try kv.remove(io, allocator, "foo");
 
 if (kv.pop(allocator, "example_array")) |value| {
     // "quux"
     allocator.free(value);
 }
 
-if (kv.popFirst(allocator, "example_array")) |value| {
+if (kv.popFirst(io, allocator, "example_array")) |value| {
     // "corge"
     allocator.free(value);
 }
@@ -164,6 +160,9 @@ Values are inserted with a relative amount of over-allocation to allow re-use of
 Keys have a maximum length of `1024` bytes in order to allow key comparison to operate exclusively on the stack.
 
 Reference counting is used to allow truncating the file when the store becomes empty.
+
+### Backend interface
+Any backend that implements the Backend.zig interface may be provided to jetkv.KV. An example is at [jetkv-SQLite](https://tangled.org/poecoh.com/jetkv-SQLite)
 
 ## License
 
