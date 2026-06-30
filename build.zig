@@ -1,25 +1,26 @@
 const std = @import("std");
 
-pub const jetkv = @import("src/jetkv.zig");
-
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const lib = b.addLibrary(.{
-        .name = "jetkv",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/root.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+
+    const zqlite = b.dependency("zqlite", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("zqlite");
+
+    const mod = b.addModule("jetkv", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "zqlite", .module = zqlite },
+        },
     });
 
-    b.installArtifact(lib);
-
     const exe = b.addExecutable(.{
-        .name = "jetkv",
+        .name = "benchmark",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/benchmark.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -27,21 +28,16 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
     const run = b.addRunArtifact(exe);
-    const run_step = b.step("run", "Run");
+    const run_step = b.step("benchmark", "Run");
     run_step.dependOn(&run.step);
 
-    const lib_unit_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-
-    _ = b.addModule("jetkv", .{ .root_source_file = b.path("src/jetkv.zig") });
-
-    const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
-
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_lib_unit_tests.step);
+    test_step.dependOn(
+        &b.addRunArtifact(
+            b.addTest(.{
+                .name = "jetkv",
+                .root_module = mod,
+            }),
+        ).step,
+    );
 }

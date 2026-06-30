@@ -1,0 +1,816 @@
+const Valkey = @This();
+
+state: enum { initial, connected } = .initial,
+pool: *Pool = undefined,
+io: Io,
+allocator: Allocator = undefined,
+config: Config = .{},
+store: Store = .{
+    .vtable = &.{
+        .get = get,
+        .put = put,
+        .putExpire = putExpire,
+        .fetchRemove = fetchRemove,
+        .remove = remove,
+        .append = append,
+        .prepend = prepend,
+        .pop = pop,
+        .popFirst = popFirst,
+    },
+},
+
+pub const Config = struct {
+    connect_mode: ConnectMode = .auto,
+    host: []const u8 = "127.0.0.1",
+    port: u16 = 6379,
+    pool_size: u16 = 8,
+    buffer_size: u32 = 4096,
+    connect_timeout: u64 = 1 * std.time.ns_per_s,
+    read_timeout: u64 = 1 * std.time.ns_per_s,
+};
+
+pub fn init(io: Io, allocator: Allocator, comptime config: Config) !Valkey {
+    const connections = try allocator.alloc(*Pool.Connection, config.pool_size);
+    var connections_created: usize = 0;
+    errdefer {
+        for (connections[0..connections_created]) |conn| allocator.destroy(conn);
+        allocator.free(connections);
+    }
+
+    for (0..config.pool_size) |index| {
+        connections[index] = try allocator.create(Pool.Connection);
+        connections_created += 1;
+        connections[index].* = .{
+            .host = config.host,
+            .port = config.port,
+            .index = index,
+        };
+    }
+    const available = try allocator.alloc(bool, config.pool_size);
+    errdefer allocator.free(available);
+    @memset(available, true);
+
+    const pool = try allocator.create(Pool);
+    pool.* = Pool{
+        .connections = connections,
+        .pool_size = config.pool_size,
+        .available = available,
+    };
+    errdefer {
+        pool.deinit(io);
+        allocator.destroy(pool);
+    }
+    var vk: Valkey = .{
+        .io = io,
+        .config = config,
+        .pool = pool,
+        .allocator = allocator,
+    };
+    if (config.connect_mode == .auto) try vk.connect(allocator);
+    return vk;
+}
+
+pub fn deinit(self: *Valkey) void {
+    self.pool.deinit(self.io);
+    for (self.pool.connections) |connection|
+        self.allocator.destroy(connection);
+    self.allocator.free(self.pool.available);
+    self.allocator.free(self.pool.connections);
+    self.allocator.destroy(self.pool);
+}
+
+fn get(s: *Store, allocator: Allocator, key: []const u8) !?[]const u8 {
+    const self: *Valkey = @fieldParentPtr("store", s);
+    const response = try self.executeWith(allocator, .get, .{key});
+    std.debug.assert(response == .null or response == .string);
+    return switch (response) {
+        .string => |string| string.value,
+        .null => null,
+        else => error.ValkeyError,
+    };
+}
+
+fn put(s: *Store, key: []const u8, value: []const u8) !void {
+    const self: *Valkey = @fieldParentPtr("store", s);
+    const response = try self.executeWith(self.allocator, .set, .{ key, value });
+    std.debug.assert(response == .ok);
+    if (response == .err) return debugError(response);
+}
+
+fn putExpire(s: *Store, key: []const u8, value: []const u8, expiration: i32) !void {
+    const self: *Valkey = @fieldParentPtr("store", s);
+    // TODO: pipeline
+    const set_response = try self.executeWith(self.allocator, .set, .{ key, value });
+    std.debug.assert(set_response == .ok);
+    if (set_response == .err) return debugError(set_response);
+
+    // Valkey expects a string as expiration time ? This is not clear from the docs:
+    // https://valkey.io/commands/expire/
+    var buf: [16]u8 = undefined;
+    const expiration_formatted = try std.fmt.bufPrint(&buf, "{d}", .{expiration});
+    const expire_response = try self.executeWith(self.allocator, .expire, .{
+        key,
+        expiration_formatted,
+    });
+
+    std.debug.assert(expire_response == .integer);
+    if (expire_response == .err) return debugError(expire_response);
+}
+
+fn fetchRemove(s: *Store, allocator: Allocator, key: []const u8) !?[]const u8 {
+    const self: *Valkey = @fieldParentPtr("store", s);
+    const response = try self.executeWith(allocator, .getdel, .{key});
+    std.debug.assert(response == .null or response == .string);
+    if (response == .err) return debugError(response);
+    return switch (response) {
+        .null => null,
+        .string => |string| string.value,
+        else => unreachable,
+    };
+}
+
+fn remove(s: *Store, key: []const u8) !void {
+    const self: *Valkey = @fieldParentPtr("store", s);
+    const response = try self.executeWith(self.allocator, .del, .{key});
+    std.debug.assert(response == .integer);
+    std.debug.assert(response.integer.value == 1);
+    if (response == .err) return debugError(response);
+}
+
+fn append(s: *Store, key: []const u8, value: []const u8) !void {
+    const self: *Valkey = @fieldParentPtr("store", s);
+    const response = try self.executeWith(self.allocator, .rpush, .{ key, value });
+    std.debug.assert(response == .integer);
+    if (response == .err) return debugError(response);
+}
+
+fn prepend(s: *Store, key: []const u8, value: []const u8) !void {
+    const self: *Valkey = @fieldParentPtr("store", s);
+    const response = try self.executeWith(self.allocator, .lpush, .{ key, value });
+    std.debug.assert(response == .integer);
+    if (response == .err) return debugError(response);
+}
+
+fn pop(s: *Store, allocator: Allocator, key: []const u8) !?[]const u8 {
+    const self: *Valkey = @fieldParentPtr("store", s);
+    const response = try self.executeWith(allocator, .rpop, .{key});
+    std.debug.assert(response == .null or response == .string);
+    if (response == .err) return debugError(response);
+    return switch (response) {
+        .null => null,
+        .string => |string| string.value,
+        else => unreachable,
+    };
+}
+
+fn popFirst(s: *Store, allocator: Allocator, key: []const u8) !?[]const u8 {
+    const self: *Valkey = @fieldParentPtr("store", s);
+    const response = try self.executeWith(allocator, .lpop, .{key});
+    std.debug.assert(response == .null or response == .string);
+    if (response == .err) return debugError(response);
+    return switch (response) {
+        .null => null,
+        .string => |string| string.value,
+        else => unreachable,
+    };
+}
+
+/// Attempt to connect to the configured Valkey host.
+pub fn connect(self: *Valkey, allocator: Allocator) !void {
+    for (self.pool.connections) |connection|
+        try connection.connect(self.io, allocator);
+}
+
+const Pool = struct {
+    pool_size: u16 = 8,
+    connections: []*Connection,
+    available: []bool,
+    mutex: Mutex = .init,
+    condition: Condition = .init,
+
+    const Connection = struct {
+        host: []const u8,
+        port: u16,
+        index: usize,
+        stream: Stream = undefined,
+        state: enum { initial, connected } = .initial,
+        comptime buffer_size: u32 = 8,
+
+        pub fn connect(self: *Connection, io: Io, allocator: Allocator) !void {
+            try self.initStream(io);
+            self.state = .connected;
+            try self.handshake(io, allocator);
+        }
+
+        pub fn deinit(self: *Connection, io: Io) void {
+            if (self.state == .connected) self.stream.close(io);
+        }
+
+        fn initStream(self: *Connection, io: Io) !void {
+            const address = IpAddress.parse(self.host, self.port) catch
+                try IpAddress.resolve(io, self.host, self.port);
+            self.stream = try address.connect(io, .{ .mode = .stream });
+        }
+
+        fn handshake(self: *Connection, io: Io, allocator: Allocator) !void {
+            var arena: ArenaAllocator = .init(allocator);
+            defer arena.deinit();
+            const response = try self.execute(
+                io,
+                arena.allocator(),
+                .hello,
+                .{"3"},
+            );
+            if (response == .err) return error.ValkeyInvalidResponse;
+        }
+
+        pub fn execute(
+            self: *Connection,
+            io: Io,
+            allocator: Allocator,
+            comptime command_name: Command.Name,
+            args: anytype,
+        ) !Response {
+            std.debug.assert(self.state == .connected);
+            var aw: Writer.Allocating = .init(allocator);
+            defer aw.deinit();
+
+            const command: Command = .{ .name = command_name };
+            try command.write(&aw.writer, args);
+            const output = try aw.toOwnedSlice();
+            defer allocator.free(output);
+            var sw = self.stream.writer(io, &.{});
+            try sw.interface.writeAll(output);
+
+            var read_buf: [self.buffer_size]u8 = undefined;
+            var stream_reader = self.stream.reader(io, &read_buf);
+            return Response.parse(allocator, &stream_reader.interface, self.buffer_size) catch |err| {
+                self.stream.close(io);
+                self.state = .initial;
+                if (err == error.ReadFailed) {
+                    if (stream_reader.err) |reader_err| {
+                        if (reader_err == error.Timeout) return error.ValkeyTimeout;
+                    }
+                    return error.EndOfStream;
+                }
+                return err;
+            };
+        }
+    };
+
+    pub fn acquire(self: *Pool, io: Io) !*Connection {
+        self.mutex.lockUncancelable(io);
+        errdefer self.mutex.unlock(io);
+
+        while (true) {
+            const available_index = self.firstAvailable() orelse {
+                try self.condition.wait(io, &self.mutex);
+                continue;
+            };
+            self.available[available_index] = false;
+            self.mutex.unlock(io);
+            return self.connections[available_index];
+        }
+    }
+
+    pub fn release(self: *Pool, io: Io, connection: *const Connection) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.available[connection.index] = true;
+        self.condition.broadcast(io);
+    }
+
+    pub fn deinit(self: *Pool, io: Io) void {
+        for (self.connections) |connection|
+            connection.deinit(io);
+    }
+
+    fn firstAvailable(self: *Pool) ?usize {
+        if (comptime backend_supports_vectors) {
+            const vec_available: @Vector(self.pool_size, bool) = self.available;
+            return if (std.simd.firstTrue(vec_available)) |index| @intCast(index) else null;
+        }
+        return for (self.available, 0..) |available, index| {
+            if (available) break index;
+        } else null;
+    }
+};
+
+const ConnectMode = enum { auto, manual, lazy };
+const backend_supports_vectors = switch (builtin.zig_backend) {
+    .stage2_llvm, .stage2_c => true,
+    else => false,
+};
+
+const Response = union(enum) {
+    map: Map,
+    err: Error,
+    ok: void,
+    string: String,
+    null: void,
+    integer: Integer,
+    array: Array,
+
+    const OK = "OK" ++ CRLF;
+
+    const Map = struct {
+        fn init() Map {
+            return .{};
+        }
+    };
+
+    const Array = struct {
+        fn init() Array {
+            return .{};
+        }
+    };
+
+    const Error = struct {
+        data: []const u8,
+        buf: []u8,
+
+        fn init(data: []const u8, comptime buffer_size: u32) Error {
+            const err = "ERR ";
+            std.debug.assert(data.len <= buffer_size);
+            std.debug.assert(std.mem.startsWith(u8, data, err));
+            const payload = data[err.len..];
+            var buf: [buffer_size]u8 = undefined;
+            @memcpy(buf[0..payload.len], data[err.len..]);
+            return .{ .buf = &buf, .data = buf[0..payload.len] };
+        }
+
+        pub fn format(self: Error, writer: *Writer) !void {
+            try writer.print("Error: {s}", .{self.data});
+        }
+    };
+
+    const String = struct {
+        value: []const u8,
+
+        fn init(allocator: Allocator, data: []const u8) !String {
+            var it = std.mem.tokenizeSequence(u8, data, CRLF);
+            const first_token = it.next();
+            std.debug.assert(first_token != null);
+            std.debug.assert(first_token.?.len > 0);
+            const len = try std.fmt.parseInt(u64, first_token.?, 0);
+            const rest = it.rest();
+            return if (rest.len == len + CRLF.len and std.mem.endsWith(u8, rest, "\r\n"))
+                .{ .value = try allocator.dupe(u8, rest[0..len]) }
+            else
+                error.ValkeyInvalidResponse;
+        }
+    };
+
+    const Integer = struct {
+        value: i64,
+
+        fn init(data: []const u8) !Integer {
+            std.debug.assert(std.mem.endsWith(u8, data, CRLF));
+            return .{ .value = try std.fmt.parseInt(i64, data[0 .. data.len - 2], 10) };
+        }
+    };
+
+    pub fn format(self: Response, writer: *Writer) !void {
+        switch (self) {
+            .map => try writer.print("Response.map", .{}),
+            .err => |err| try writer.print("Response.err{{ .err = {s} }}", .{err.data}),
+            .ok => try writer.print("Response.ok", .{}),
+            .string => |string| try writer.print(
+                "Response.string{{ .value = {s} }}",
+                .{string.value},
+            ),
+            .null => try writer.print("Response.null", .{}),
+            .integer => |integer| try writer.print(
+                "Response.integer{{ .value = {} }}",
+                .{integer.value},
+            ),
+            .array => try writer.print("Response.array", .{}),
+        }
+    }
+
+    fn parse(allocator: Allocator, r: *Io.Reader, comptime buffer_size: u32) !Response {
+        const code = (try r.takeArray(1))[0];
+        const parts_count = switch (code) {
+            '-', '+', '_', ':' => 1,
+            '*' => try readInt(r, buffer_size),
+            '$' => 2,
+            '%' => try readInt(r, buffer_size),
+            else => {
+                std.debug.print("Valkey Unsupported Response: `{c}`\n", .{code});
+                return error.ValkeyUnsupportedResponse;
+            },
+        };
+
+        if (code == '%') {
+            // We parse Maps to ensure that we exhaust the response returned by Redis so
+            // that the next response is clean but we don't support them as values. We
+            // get a Map response from the initial `HELLO` handshake.
+            for (0..parts_count) |_| {
+                const key = try parse(allocator, r, buffer_size);
+                const value = try parse(allocator, r, buffer_size);
+                _ = key;
+                _ = value;
+            }
+            return Response{ .map = Response.Map.init() };
+        }
+
+        // Backed by stack-fallback allocator:
+        var aw: Writer.Allocating = .init(allocator);
+        defer aw.deinit();
+
+        if (code == '$') {
+            const bytes_to_read = try readInt(r, buffer_size);
+            try aw.writer.print("{}\r\n", .{bytes_to_read});
+            var string_buf: [buffer_size]u8 = undefined;
+            var remaining = bytes_to_read;
+            while (remaining > 0) {
+                const chunk = @min(string_buf.len, remaining);
+                try r.readSliceAll(string_buf[0..chunk]);
+                remaining -= chunk;
+                _ = try aw.writer.write(string_buf[0..chunk]);
+            }
+            try readUntilTerminator(&aw.writer, r, buffer_size);
+        } else try readParts(&aw.writer, parts_count, r, buffer_size);
+
+        const payload = try aw.toOwnedSlice();
+        defer allocator.free(payload);
+
+        return switch (code) {
+            '-' => Response{ .err = .init(payload, buffer_size) },
+            '+' => if (std.mem.eql(u8, Response.OK, payload))
+                Response.ok
+            else
+                error.ValkeyUnsupportedResponse,
+            '$' => Response{ .string = try .init(allocator, payload) },
+            '_' => Response.null,
+            ':' => Response{ .integer = try .init(payload) },
+            '*' => Response{ .array = .init() },
+            else => error.ValkeyError,
+        };
+    }
+
+    fn readInt(r: *Io.Reader, comptime buffer_size: u32) !u64 {
+        var buf: [20]u8 = undefined;
+        var writer: Writer = .fixed(&buf);
+        try readUntilTerminator(&writer, r, buffer_size);
+        const value = writer.buffered();
+        std.debug.assert(std.mem.endsWith(u8, value, CRLF));
+        return std.fmt.parseInt(u64, value[0 .. value.len - 2], 10);
+    }
+
+    fn readUntilTerminator(writer: *Writer, r: *Io.Reader, comptime buffer_size: u32) !void {
+        var cr = false;
+        var buf: [buffer_size]u8 = undefined;
+        var cursor: usize = 0;
+        while (true) {
+            const byte = (try r.takeArray(1))[0];
+            if (byte == '\r') cr = true;
+            buf[cursor] = byte;
+            cursor += 1;
+            if (cursor == buf.len) {
+                try writer.writeAll(buf[0..]);
+                cursor = 0;
+            }
+            if (cr and byte == '\n') {
+                if (cursor != buf.len) try writer.writeAll(buf[0..cursor]);
+                break;
+            }
+        }
+    }
+
+    fn readParts(writer: *Writer, parts_count: usize, r: *Io.Reader, comptime buffer_size: u32) !void {
+        for (0..parts_count) |_|
+            try readUntilTerminator(writer, r, buffer_size);
+    }
+};
+
+const Command = struct {
+    name: Name,
+
+    const Name = enum {
+        hello,
+        flushdb,
+        get,
+        set,
+        del,
+        getdel,
+        rpush,
+        rpop,
+        lpush,
+        lpop,
+        expire,
+    };
+
+    pub fn write(comptime self: Command, writer: *Writer, args: anytype) !void {
+        // Valkey supports multiple values for some commands. For consistency with other backends
+        // we only support one value (e.g. `DEL`, `RPUSH`, etc.).
+        const command = comptime blk: {
+            const tag = @tagName(self.name);
+            var command_buf: [tag.len]u8 = undefined;
+            break :blk std.ascii.upperString(command_buf[0..], tag);
+        };
+        const args_len = @typeInfo(@TypeOf(args)).@"struct".fields.len;
+        const prefix = std.fmt.comptimePrint(
+            "*{1}{0s}${2}{0s}{3s}{0s}",
+            .{ CRLF, args_len + 1, command.len, command },
+        );
+        try writer.writeAll(prefix);
+        inline for (args) |arg| {
+            const T = @TypeOf(arg);
+            switch (@typeInfo(T)) {
+                .int, .comptime_int => {
+                    try writer.print(":{}{s}", .{ arg, CRLF });
+                },
+                // We only support strings - let Zig compiler catch failures if `arg` is not
+                // coercable to `[]const u8`
+                else => {
+                    try writer.print("${1}{0s}{2s}{0s}", .{ CRLF, arg.len, arg });
+                },
+            }
+        }
+    }
+};
+
+pub fn execute(
+    self: Valkey,
+    allocator: Allocator,
+    comptime command_name: Command.Name,
+    args: anytype,
+) !Response {
+    return self.executeWith(allocator, command_name, args);
+}
+
+fn executeWith(
+    self: Valkey,
+    allocator: Allocator,
+    comptime command_name: Command.Name,
+    args: anytype,
+) !Response {
+    const connection = try self.pool.acquire(self.io);
+    if (connection.state == .initial) try connection.connect(self.io, allocator);
+    defer self.pool.release(self.io, connection);
+    return connection.execute(self.io, allocator, command_name, args);
+}
+
+pub fn flush(self: Valkey, allocator: Allocator) !void {
+    const response = try self.executeWith(allocator, .flushdb, .{"sync"});
+    std.debug.assert(response == .ok);
+    if (response == .err) return debugError(response);
+}
+
+fn debugError(response: Response) error{ValkeyError} {
+    std.debug.assert(response == .err);
+    std.debug.print("{any}\n", .{response});
+    return error.ValkeyError;
+}
+
+const CRLF = "\r\n";
+
+const t = std.testing;
+
+// Probe the configured Valkey server. When nothing is listening on the default port, skip the
+// test so the suite passes in environments without a running Valkey instance.
+fn requireServer() !void {
+    const address: IpAddress = try .parse("127.0.0.1", 6379);
+    const stream = address.connect(t.io, .{ .mode = .stream }) catch
+        return error.SkipZigTest;
+    stream.close(t.io);
+}
+
+test "auto connect" {
+    try requireServer();
+    var valkey: Valkey = try .init(t.io, t.allocator, .{});
+    defer valkey.deinit();
+    for (valkey.pool.connections) |connection|
+        try t.expectEqual(connection.state, .connected);
+}
+
+test "manual connect" {
+    try requireServer();
+    var valkey: Valkey = try .init(t.io, t.allocator, .{ .connect_mode = .manual });
+    defer valkey.deinit();
+    for (valkey.pool.connections) |connection|
+        try t.expectEqual(connection.state, .initial);
+    try valkey.connect(t.allocator);
+    for (valkey.pool.connections) |connection|
+        try t.expectEqual(connection.state, .connected);
+}
+
+test "lazy connect" {
+    try requireServer();
+    var valkey: Valkey = try .init(t.io, t.allocator, .{ .connect_mode = .lazy });
+    defer valkey.deinit();
+    for (valkey.pool.connections) |connection|
+        try t.expectEqual(connection.state, .initial);
+    try valkey.flush(t.allocator);
+    for (valkey.pool.connections) |connection|
+        if (connection.state == .connected) break else try t.expect(false);
+}
+
+test "put/get" {
+    try requireServer();
+    var valkey: Valkey = try .init(t.io, t.allocator, .{});
+    defer valkey.deinit();
+    try valkey.flush(t.allocator);
+    try valkey.store.put("foo", "bar");
+    try valkey.store.put("baz", "qux");
+    try valkey.store.put("quux", "corge");
+    const foo = try valkey.store.get(t.allocator, "foo");
+    defer t.allocator.free(foo.?);
+    try t.expectEqualStrings("bar", foo.?);
+    const baz = try valkey.store.get(t.allocator, "baz");
+    defer t.allocator.free(baz.?);
+    try t.expectEqualStrings("qux", baz.?);
+    const quux = try valkey.store.get(t.allocator, "quux");
+    defer t.allocator.free(quux.?);
+    try t.expectEqualStrings("corge", quux.?);
+}
+
+test "get missing key" {
+    try requireServer();
+    var valkey: Valkey = try .init(t.io, t.allocator, .{});
+    defer valkey.deinit();
+    try valkey.flush(t.allocator);
+    try t.expect(try valkey.store.get(t.allocator, "foo") == null);
+}
+
+test "remove" {
+    try requireServer();
+    var valkey: Valkey = try .init(t.io, t.allocator, .{});
+    defer valkey.deinit();
+    try valkey.flush(t.allocator);
+    try valkey.store.put("foo", "bar");
+    const foo1 = try valkey.store.get(t.allocator, "foo");
+    defer t.allocator.free(foo1.?);
+    try t.expectEqualStrings("bar", foo1.?);
+    try valkey.store.remove("foo");
+    try t.expect(try valkey.store.get(t.allocator, "foo") == null);
+}
+
+test "fetchRemove" {
+    try requireServer();
+    var valkey: Valkey = try .init(t.io, t.allocator, .{});
+    defer valkey.deinit();
+    try valkey.flush(t.allocator);
+    try valkey.store.put("foo", "bar");
+    const foo1 = try valkey.store.get(t.allocator, "foo");
+    defer t.allocator.free(foo1.?);
+    try t.expectEqualStrings("bar", foo1.?);
+    const foo2 = try valkey.store.fetchRemove(t.allocator, "foo");
+    defer t.allocator.free(foo2.?);
+    try t.expectEqualStrings("bar", foo2.?);
+    try t.expect(try valkey.store.get(t.allocator, "foo") == null);
+}
+
+test "append/pop" {
+    try requireServer();
+    var valkey: Valkey = try .init(t.io, t.allocator, .{});
+    defer valkey.deinit();
+    try valkey.flush(t.allocator);
+    try valkey.store.append("foo", "bar");
+    const foo1 = try valkey.store.pop(t.allocator, "foo");
+    defer t.allocator.free(foo1.?);
+    try t.expectEqualStrings("bar", foo1.?);
+    try t.expect(try valkey.store.pop(t.allocator, "foo") == null);
+}
+
+test "prepend/popFirst" {
+    try requireServer();
+    var valkey: Valkey = try .init(t.io, t.allocator, .{});
+    defer valkey.deinit();
+    try valkey.flush(t.allocator);
+    try valkey.store.prepend("foo", "bar");
+    const foo1 = try valkey.store.popFirst(t.allocator, "foo");
+    defer t.allocator.free(foo1.?);
+    try t.expectEqualStrings("bar", foo1.?);
+    try t.expect(try valkey.store.popFirst(t.allocator, "foo") == null);
+}
+
+test "putExpire" {
+    try requireServer();
+    var valkey: Valkey = try .init(t.io, t.allocator, .{});
+    defer valkey.deinit();
+    try valkey.flush(t.allocator);
+    try valkey.store.putExpire("foo", "bar", 1);
+    const value1 = try valkey.store.get(t.allocator, "foo");
+    defer t.allocator.free(value1.?);
+    try t.expectEqualStrings("bar", value1.?);
+    const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromNanoseconds(1_100_000_000), .clock = .real } };
+    try timeout.sleep(t.io);
+    try t.expect(try valkey.store.get(t.allocator, "foo") == null);
+}
+
+test "put data exceeding buffer size" {
+    try requireServer();
+    var valkey: Valkey = try .init(t.io, t.allocator, .{});
+    defer valkey.deinit();
+    try valkey.flush(t.allocator);
+    const data = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    try valkey.store.put("foo", data);
+    const value = try valkey.store.get(t.allocator, "foo");
+    defer t.allocator.free(value.?);
+    try t.expectEqualStrings(data, value.?);
+}
+
+test "slow/incomplete response" {
+    const address: IpAddress = try .parse("127.0.0.1", 63379);
+    var server = try address.listen(t.io, .{ .reuse_address = true });
+    defer server.deinit(t.io);
+    var thread: Thread = try .spawn(
+        .{ .allocator = t.allocator },
+        launchTestServer,
+        .{ &server, "$10\r\noops\r\n" },
+    );
+    defer thread.join();
+    var valkey: Valkey = try .init(t.io, t.allocator, .{
+        .port = 63379,
+        .connect_mode = .lazy,
+    });
+    defer valkey.deinit();
+    try t.expectError(
+        error.EndOfStream,
+        valkey.store.get(t.allocator, "foo"),
+    );
+}
+
+test "invalid string response" {
+    const address: IpAddress = try .parse("127.0.0.1", 63379);
+    var server = try address.listen(t.io, .{ .reuse_address = true });
+    defer server.deinit(t.io);
+    var thread: Thread = try .spawn(
+        .{ .allocator = t.allocator },
+        launchTestServer,
+        .{ &server, "$2\r\noops\r\n" },
+    );
+    defer thread.join();
+    var valkey: Valkey = try .init(t.io, t.allocator, .{
+        .port = 63379,
+        .connect_mode = .lazy,
+    });
+    defer valkey.deinit();
+    try t.expectError(
+        error.ValkeyInvalidResponse,
+        valkey.store.get(t.allocator, "foo"),
+    );
+}
+
+test "invalid integer response" {
+    const address: IpAddress = try .parse("127.0.0.1", 63379);
+    var server = try address.listen(t.io, .{ .reuse_address = true });
+    defer server.deinit(t.io);
+    var thread: Thread = try .spawn(
+        .{ .allocator = t.allocator },
+        launchTestServer,
+        .{ &server, ":123" },
+    );
+    defer thread.join();
+    var valkey: Valkey = try .init(t.io, t.allocator, .{
+        .port = 63379,
+        .connect_mode = .lazy,
+    });
+    defer valkey.deinit();
+    try t.expectError(
+        error.EndOfStream,
+        valkey.store.get(t.allocator, "foo"),
+    );
+}
+
+test "valkey backend" {
+    try requireServer();
+
+    var backend: Valkey = try .init(t.io, t.allocator, .{});
+    defer backend.deinit();
+
+    const store = &backend.store;
+
+    try store.put("foo", "bar");
+
+    const foo = try store.get(t.allocator, "foo") orelse
+        return t.expect(false);
+    defer t.allocator.free(foo);
+    try t.expectEqualStrings("bar", foo);
+
+    try t.expect(try store.get(t.allocator, "baz") == null);
+}
+
+fn launchTestServer(server: *Io.net.Server, response: []const u8) void {
+    const stream = server.accept(t.io) catch unreachable;
+    defer stream.close(t.io);
+    var write_buf: [1024]u8 = undefined;
+    var w = stream.writer(t.io, &write_buf);
+    w.interface.writeAll(response) catch unreachable;
+    w.interface.flush() catch unreachable;
+}
+
+const builtin = @import("builtin");
+const std = @import("std");
+const Io = std.Io;
+const Mutex = Io.Mutex;
+const Writer = Io.Writer;
+const Condition = Io.Condition;
+const Stream = Io.net.Stream;
+const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
+const IpAddress = Io.net.IpAddress;
+const Thread = std.Thread;
+const Store = @import("Store.zig");
