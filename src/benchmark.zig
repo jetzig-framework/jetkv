@@ -13,9 +13,7 @@ const count = 12_500;
 const thread_count = 8;
 
 pub fn main(init: Init) !void {
-    var valkey: jetkv.Valkey = try .init(init.io, init.gpa, .{
-        .pool_size = 16,
-    });
+    var valkey: jetkv.Valkey(.{ .pool_size = 16 }) = try .init(init.io, init.gpa);
     defer valkey.deinit();
     const store = &valkey.store;
     try store.put("foo", "bar");

@@ -28,7 +28,7 @@ _JetKV_ is used by the [Jetzig Web Framework](https://jetzig.dev/) to provide a 
 Recommended for production.
 
 ```zig
-var kv = try jetkv.valkey(io, allocator, .{});
+var kv: jetkv.Valkey(.{}) = try .init(io, allocator);
 defer kv.deinit();
 const store = &kv.store;
 ```

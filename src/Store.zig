@@ -67,7 +67,7 @@ test putExpire {
     });
     defer f.deinit();
 
-    var v: Valkey = try .init(t.io, t.allocator, .{});
+    var v: Valkey(.{}) = try .init(t.io, t.allocator);
     defer v.deinit();
 
     var s: SQLite = try .init(t.io, .{
@@ -249,7 +249,7 @@ fn unimplementedPopFirst(_: *Store, _: Allocator, _: []const u8) !?[]const u8 {
 }
 
 const Backends = struct {
-    valkey: Valkey,
+    valkey: Valkey(.{}),
     memory: Memory,
     file: File,
     sqlite: SQLite,
@@ -257,7 +257,7 @@ const Backends = struct {
     pub fn init(io: Io, allocator: Allocator) !Backends {
         try requireServer();
         return .{
-            .valkey = try .init(io, allocator, .{}),
+            .valkey = try .init(io, allocator),
             .memory = .init(io, allocator),
             .file = try .init(io, .{ .path = "/tmp/jetkv_file.db" }),
             .sqlite = try .init(io, .{ .path = "/tmp/jetkv_sqlite.db" }),
@@ -296,5 +296,5 @@ const IpAddress = Io.net.IpAddress;
 const Timeout = Io.Timeout;
 const Memory = @import("Memory.zig");
 const File = @import("File.zig");
-const Valkey = @import("Valkey.zig");
+const Valkey = @import("valkey.zig").Valkey;
 const SQLite = @import("SQLite.zig");
